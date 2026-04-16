@@ -1,5 +1,7 @@
 # serial-mux
 
+[English](README.md) | [中文](README_zh.md)
+
 串口多路复用工具 — 允许多个客户端通过 daemon + Unix socket 架构共享同一个串口设备。
 
 ## 功能特性

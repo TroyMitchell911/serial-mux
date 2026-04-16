@@ -1,5 +1,7 @@
 # serial-mux
 
+[English](README.md) | [中文](README_zh.md)
+
 A serial port multiplexer that lets multiple clients share a single serial port simultaneously. A per-port daemon owns the serial device and fans data out to all connected clients over Unix domain sockets, with persistent logging and identity tagging.
 
 Think `tio` or `minicom`, but multiplexed — two people (or a person and an AI agent) can interact with the same serial console at the same time, and everyone sees everything.
