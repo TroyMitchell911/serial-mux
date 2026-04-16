@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "serial-mux"
+version = "0.1.0"
+description = "Serial port multiplexer with multi-client support"
+requires-python = ">=3.10"
+dependencies = [
+    "pyserial>=3.5",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+serial-mux = "serial_mux.cli:main"
+smtty = "serial_mux.client:main"
+
+[tool.setuptools.packages.find]
+include = ["serial_mux*"]
