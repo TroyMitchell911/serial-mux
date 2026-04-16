@@ -26,7 +26,17 @@ Each serial port gets its own independent daemon process. Clients connect and di
 
 ## Installation
 
-### Prerequisites
+### One-line install (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TroyMitchell911/serial-mux/main/install.sh | sudo bash
+```
+
+The script clones the repo to `/usr/local/lib/serial-mux`, installs dependencies, and creates wrapper scripts in `/usr/local/bin`. It also checks if your user is in the correct serial device group.
+
+### Manual install
+
+#### Prerequisites
 
 - Python >= 3.10
 - User must be in the group that owns the serial device
@@ -42,14 +52,15 @@ On Debian/Ubuntu (group is `dialout`):
 sudo usermod -aG dialout $USER
 ```
 
-### Install
+#### Install
 
 ```bash
+git clone https://github.com/TroyMitchell911/serial-mux.git
 cd serial-mux
 pip install -e .
 ```
 
-### Create the smtty-agent symlink
+#### Create the smtty-agent symlink
 
 `smtty-agent` is the same binary as `smtty` — it detects its identity from `argv[0]`. You need to create a symlink:
 

@@ -15,7 +15,19 @@
 
 ## 安装
 
+### 一键安装（推荐）
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/TroyMitchell911/serial-mux/main/install.sh | sudo bash
+```
+
+脚本会将仓库 clone 到 `/usr/local/lib/serial-mux`，安装依赖，并在 `/usr/local/bin` 创建 `serial-mux`、`smtty`、`smtty-agent` 三个命令。同时会检测当前用户是否在串口设备组中。
+
+### 手动安装
+
+```bash
+git clone https://github.com/TroyMitchell911/serial-mux.git
+cd serial-mux
 pip install -e .
 ```
 
