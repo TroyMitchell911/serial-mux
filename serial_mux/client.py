@@ -17,7 +17,7 @@ from .protocol import sync_read_msg, sync_write_msg, b64, unb64
 def get_identity() -> str:
     """Determine identity from argv[0]."""
     name = Path(sys.argv[0]).name
-    if "hermes" in name.lower():
+    if "agent" in name.lower():
         return "H"
     return "U"
 
@@ -268,7 +268,7 @@ def main():
     identity = get_identity()
 
     parser = argparse.ArgumentParser(
-        prog="smtty" if identity == "U" else "smtty-hermes",
+        prog="smtty" if identity == "U" else "smtty-agent",
         description="serial-mux interactive client"
     )
     parser.add_argument("alias", help="Alias or device path")

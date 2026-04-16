@@ -18,8 +18,8 @@ serial-mux daemon (后台进程，每个串口一个)
     +---> Unix socket (~/.serial-mux/sock/<alias>.sock)
               |
               +---> smtty <alias>           交互式客户端 [U]
-              +---> smtty-hermes <alias>    交互式客户端 [H]
-              +---> smtty-hermes <alias> --send/--wait  非交互式
+              +---> smtty-agent <alias>    交互式客户端 [H]
+              +---> smtty-agent <alias> --send/--wait  非交互式
 ```
 
 ## 命令体系
@@ -50,11 +50,11 @@ die1     /dev/ttyUSB1   115200   0        2h 15m
 
 ```
 smtty <alias>                                          # 交互式，标记 [U]
-smtty-hermes <alias>                                   # 交互式，标记 [H]
-smtty-hermes <alias> --send "ls" --wait "root@" --timeout 5   # 非交互式
+smtty-agent <alias>                                   # 交互式，标记 [H]
+smtty-agent <alias> --send "ls" --wait "root@" --timeout 5   # 非交互式
 ```
 
-- `smtty` 和 `smtty-hermes` 是同一个可执行文件的 symlink
+- `smtty` 和 `smtty-agent` 是同一个可执行文件的 symlink
 - 程序通过 `argv[0]` 检测自身名称决定身份标记
 - alias 优先查找，未匹配时当设备路径处理
 
@@ -114,7 +114,7 @@ Linux version 6.x ...
 ## 非交互模式（Hermes 专用）
 
 ```
-smtty-hermes die0 --send "ls" --wait "root@" --timeout 5
+smtty-agent die0 --send "ls" --wait "root@" --timeout 5
 ```
 
 流程：
