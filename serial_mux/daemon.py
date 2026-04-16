@@ -405,6 +405,14 @@ def start_daemon(device: str, baud: int, alias: str, foreground: bool = False):
                 # Stale PID file
                 pid_path.unlink(missing_ok=True)
 
+        # Validate serial port access BEFORE daemonizing so errors are visible
+        try:
+            test_ser = serial.Serial(port=device, baudrate=baud, timeout=0.05)
+            test_ser.close()
+        except serial.SerialException as e:
+            print(f"Error: Cannot open {device}: {e}")
+            sys.exit(1)
+
         print(f"Starting daemon: {alias} -> {device} @ {baud}", flush=True)
         daemonize()
 
@@ -421,4 +429,9 @@ def start_daemon(device: str, baud: int, alias: str, foreground: bool = False):
         )
 
     daemon = SerialDaemon(device, baud, alias, config)
-    asyncio.run(daemon.run())
+    try:
+        asyncio.run(daemon.run())
+    except Exception as e:
+        logger.error(f"Daemon fatal error: {e}")
+        daemon._cleanup_files()
+        sys.exit(1)
