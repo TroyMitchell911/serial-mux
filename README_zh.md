@@ -8,7 +8,7 @@
 
 - 一个串口，多个客户端同时访问
 - daemon 后台驻留，独占串口，通过 Unix socket 扇出数据
-- 交互式客户端 `smtty` / `smtty-agent`，分别标记 `[U]`（User）和 `[H]`（Agent）
+- 交互式客户端 `smtty` / `smtty-agent`
 - 非交互模式支持发送命令、等待匹配、echo 校验与自动重试
 - alias 机制解耦设备路径，拔插不影响使用
 - 按日期分割的持久化日志，自动清理过期文件
@@ -67,13 +67,13 @@ serial-mux start /dev/ttyUSB0 --baud 115200 --alias die0 --foreground
 
 ### 2. 连接串口
 
-以用户身份连接（标记 `[U]`）：
+连接串口（以用户身份）：
 
 ```bash
 smtty die0
 ```
 
-以 Agent 身份连接（标记 `[H]`）：
+连接串口（以 Agent 身份）：
 
 ```bash
 smtty-agent die0
@@ -113,11 +113,11 @@ die1     /dev/ttyUSB1   115200   0        2h 15m
 
 | 命令 | 说明 |
 |------|------|
-| `smtty <alias>` | 交互式客户端，标记 `[U]`（User） |
-| `smtty-agent <alias>` | 交互式客户端，标记 `[H]`（Agent） |
+| `smtty <alias>` | 交互式客户端 |
+| `smtty-agent <alias>` | 交互式客户端 |
 | `smtty-agent <alias> --send 'cmd' --wait 'pattern' --timeout 5` | 非交互模式 |
 
-`smtty` 和 `smtty-agent` 是同一个可执行文件的 symlink，程序通过 `argv[0]` 检测自身名称来决定身份标记。
+`smtty` 和 `smtty-agent` 是同一个可执行文件的 symlink。
 
 ## 非交互模式
 
@@ -202,17 +202,15 @@ scrollback_lines: 5000      # attach 时回放的历史行数
 
 日志文件按 alias + 日期分割，存储在 `~/.serial-mux/logs/<alias>/YYYY-MM-DD.log`。
 
-每行带时间戳，用户/Agent 发送的命令额外带来源标记：
+每行带时间戳：
 
 ```
-[2026-04-16 16:30:01] [U] echo hello
+[2026-04-16 16:30:01] echo hello
 [2026-04-16 16:30:01] hello
-[2026-04-16 16:30:05] [H] cat /proc/version
+[2026-04-16 16:30:05] cat /proc/version
 [2026-04-16 16:30:05] Linux version 6.x ...
 ```
 
-- `[U]` — 用户（smtty）发送的命令
-- `[H]` — Agent（smtty-agent）发送的命令
 - 无标记 — 设备自身输出
 
 ### 自动清理

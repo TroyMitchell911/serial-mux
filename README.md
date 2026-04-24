@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_zh.md)
 
-A serial port multiplexer that lets multiple clients share a single serial port simultaneously. A per-port daemon owns the serial device and fans data out to all connected clients over Unix domain sockets, with persistent logging and identity tagging.
+A serial port multiplexer that lets multiple clients share a single serial port simultaneously. A per-port daemon owns the serial device and fans data out to all connected clients over Unix domain sockets, with persistent logging.
 
 Think `tio` or `minicom`, but multiplexed — two people (or a person and an AI agent) can interact with the same serial console at the same time, and everyone sees everything.
 
@@ -19,9 +19,9 @@ serial-mux daemon (one per device, background process)
     |
     +---> Unix socket (~/.serial-mux/sock/<alias>.sock)
               |
-              +---> smtty <alias>                          interactive [U]
-              +---> smtty-agent <alias>                    interactive [H]
-              +---> smtty-agent <alias> --send/--wait      non-interactive [H]
+              +---> smtty <alias>                          interactive
+              +---> smtty-agent <alias>                    interactive
+              +---> smtty-agent <alias> --send/--wait      non-interactive
 ```
 
 Each serial port gets its own independent daemon process. Clients connect and disconnect freely without affecting the daemon or each other. The daemon double-forks to daemonize (no systemd dependency).
@@ -64,7 +64,7 @@ pip install -e .
 
 #### Create the smtty-agent symlink
 
-`smtty-agent` is the same binary as `smtty` — it detects its identity from `argv[0]`. You need to create a symlink:
+`smtty-agent` is the same binary as `smtty`, accessed via a symlink:
 
 ```bash
 ln -sf $(which smtty) $(dirname $(which smtty))/smtty-agent
@@ -136,7 +136,7 @@ Logs:    3 files, 42.5 KB
 smtty die0
 ```
 
-Connects to the daemon for `die0`, replays scrollback history from the log, then enters live interactive mode. Input is tagged `[U]` in the log.
+Connects to the daemon for `die0`, replays scrollback history from the log, then enters live interactive mode. Input is logged with the command.
 
 #### smtty-agent — agent interactive mode
 
@@ -144,7 +144,7 @@ Connects to the daemon for `die0`, replays scrollback history from the log, then
 smtty-agent die0
 ```
 
-Identical to `smtty` but input is tagged `[H]` in the log. The program detects its name from `argv[0]` to decide the tag.
+Identical to `smtty` but commonly used for agents or automation.
 
 #### Detaching
 
@@ -181,18 +181,18 @@ Non-interactive mode verifies that the serial device echoed the command back cor
 
 ## Identity Tagging
 
-Every input sent through the serial port is tagged with the sender's identity:
+Every input sent through the serial port is logged with a timestamp:
 
-- `[U]` — sent by a human user via `smtty`
-- `[H]` — sent by an AI agent (or automation) via `smtty-agent`
 
-This appears in both the live output seen by all connected clients and in the persistent log files. Device output (responses from the serial device) is not tagged.
+
+
+Device output (responses from the serial device) is logged without modification.
 
 Example session as seen in the log:
 ```
-[2026-04-16 16:30:01] [U] echo hello
+[2026-04-16 16:30:01] echo hello
 [2026-04-16 16:30:01] hello
-[2026-04-16 16:30:05] [H] cat /proc/version
+[2026-04-16 16:30:05] cat /proc/version
 [2026-04-16 16:30:05] Linux version 6.x ...
 ```
 
@@ -273,9 +273,9 @@ serial-mux start /dev/ttyUSB0 --baud 115200 --alias die0
 smtty die0
 # (type commands, see output, Ctrl+] to detach)
 
-# In another terminal, attach as an agent
+# In another terminal, attach another client
 smtty-agent die0
-# (both sessions see each other's input/output in real time)
+# (both sessions see the same output in real time)
 
 # Send a command non-interactively from a script
 output=$(smtty-agent die0 --send 'cat /proc/uptime' --wait '# ' --timeout 5)

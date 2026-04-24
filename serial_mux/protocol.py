@@ -5,7 +5,7 @@ Message format: 4-byte big-endian length prefix + JSON payload.
 Message types:
 
 Client -> Daemon:
-  {"type": "hello", "identity": "U"|"H"}
+  {"type": "hello"}
   {"type": "input", "data": "<base64 encoded bytes>"}
   {"type": "history_request"}
 
@@ -13,7 +13,6 @@ Daemon -> Client:
   {"type": "hello_ack", "alias": "...", "device": "...", "baud": ...}
   {"type": "output", "data": "<base64 encoded bytes>"}
   {"type": "history", "lines": ["...", ...]}
-  {"type": "tagged_input", "identity": "U"|"H", "data": "<base64>"}
   {"type": "error", "message": "..."}
 """
 

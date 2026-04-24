@@ -10,16 +10,11 @@ import termios
 import tty
 from pathlib import Path
 
+import re
+from datetime import datetime
+
 from .config import Config
 from .protocol import sync_read_msg, sync_write_msg, b64, unb64
-
-
-def get_identity() -> str:
-    """Determine identity from argv[0]."""
-    name = Path(sys.argv[0]).name
-    if "agent" in name.lower():
-        return "H"
-    return "U"
 
 
 def resolve_socket(config: Config, alias: str) -> str:
@@ -39,7 +34,7 @@ def resolve_socket(config: Config, alias: str) -> str:
     return ""
 
 
-def connect(config: Config, alias: str, identity: str) -> socket.socket:
+def connect(config: Config, alias: str) -> socket.socket:
     """Connect to daemon and perform handshake."""
     sock_path = resolve_socket(config, alias)
     if not sock_path:
@@ -55,7 +50,7 @@ def connect(config: Config, alias: str, identity: str) -> socket.socket:
     sock.connect(sock_path)
 
     # Send hello
-    sync_write_msg(sock, {"type": "hello", "identity": identity})
+    sync_write_msg(sock, {"type": "hello"})
 
     # Read hello_ack
     msg = sync_read_msg(sock)
@@ -66,17 +61,24 @@ def connect(config: Config, alias: str, identity: str) -> socket.socket:
     return sock
 
 
-def interactive_mode(config: Config, alias: str, identity: str):
+_TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+
+
+def _strip_timestamp(line: str) -> str:
+    """Remove leading [YYYY-MM-DD HH:MM:SS] prefix from a log line."""
+    return _TS_RE.sub("", line)
+
+
+def interactive_mode(config: Config, alias: str, timestamps: bool = False):
     """Interactive attach mode — like tio/minicom but multiplexed."""
-    sock = connect(config, alias, identity)
-    tag = f"[{identity}]"
+    sock = connect(config, alias)
 
     # Read history and print to stdout
     msg = sync_read_msg(sock)
     if msg and msg.get("type") == "history":
         lines = msg.get("lines", [])
         for line in lines:
-            print(line)
+            print(line if timestamps else _strip_timestamp(line))
         if lines:
             sys.stdout.flush()
 
@@ -86,11 +88,8 @@ def interactive_mode(config: Config, alias: str, identity: str):
         tty.setraw(sys.stdin.fileno())
         sock.setblocking(False)
 
-        print(f"\r\n--- serial-mux: attached to {alias} as {tag} (Ctrl+] to detach) ---\r\n",
+        print(f"\r\n--- serial-mux: attached to {alias} (Ctrl+] to detach) ---\r\n",
               end="", flush=True)
-
-        line_buf = bytearray()  # Buffer for building input lines for tagging
-        input_buf = bytearray()  # Raw input accumulator
 
         while True:
             readable, _, _ = select.select([sys.stdin, sock], [], [], 0.1)
@@ -125,10 +124,6 @@ def interactive_mode(config: Config, alias: str, identity: str):
                         data = unb64(msg["data"])
                         os.write(sys.stdout.fileno(), data)
 
-                    elif msg["type"] == "tagged_input":
-                        # Another client sent input — we see it via serial echo
-                        pass
-
                 except BlockingIOError:
                     pass
                 except (ConnectionResetError, BrokenPipeError):
@@ -142,13 +137,13 @@ def interactive_mode(config: Config, alias: str, identity: str):
         sock.close()
 
 
-def noninteractive_mode(config: Config, alias: str, identity: str,
+def noninteractive_mode(config: Config, alias: str,
                          send_cmd: str, wait_pattern: str = None,
                          timeout: float = 10.0):
     """Non-interactive mode: send command, verify echo, wait for pattern."""
     import time
 
-    sock = connect(config, alias, identity)
+    sock = connect(config, alias)
 
     # Drain history
     msg = sync_read_msg(sock)  # history message
@@ -265,10 +260,8 @@ def _print_output(output: str, cmd: str):
 
 
 def main():
-    identity = get_identity()
-
     parser = argparse.ArgumentParser(
-        prog="smtty" if identity == "U" else "smtty-agent",
+        prog="smtty",
         description="serial-mux interactive client"
     )
     parser.add_argument("alias", help="Alias or device path")
@@ -276,12 +269,14 @@ def main():
     parser.add_argument("--wait", "-w", help="Wait for pattern after sending")
     parser.add_argument("--timeout", "-t", type=float, default=10.0,
                         help="Timeout in seconds for --wait (default: 10)")
+    parser.add_argument("--timestamps", "-T", action="store_true", default=False,
+                        help="Show timestamps in history playback")
 
     args = parser.parse_args()
     config = Config.load()
 
     if args.send:
-        noninteractive_mode(config, args.alias, identity,
+        noninteractive_mode(config, args.alias,
                            send_cmd=args.send,
                            wait_pattern=args.wait,
                            timeout=args.timeout)
@@ -289,7 +284,7 @@ def main():
         if not sys.stdin.isatty():
             print("Error: Interactive mode requires a terminal", file=sys.stderr)
             sys.exit(1)
-        interactive_mode(config, args.alias, identity)
+        interactive_mode(config, args.alias, timestamps=args.timestamps)
 
 
 if __name__ == "__main__":

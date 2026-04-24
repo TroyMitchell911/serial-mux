@@ -33,7 +33,7 @@ class SerialDaemon:
         self.alias = alias
         self.config = config
         self.ser: Optional[serial.Serial] = None
-        self.clients: dict[asyncio.StreamWriter, str] = {}  # writer -> identity
+        self.clients: list[asyncio.StreamWriter] = []
         self.log_lines: list[str] = []  # ring buffer for scrollback
         self.log_file = None
         self.log_date: Optional[str] = None
@@ -195,7 +195,7 @@ class SerialDaemon:
     async def _broadcast(self, msg: dict):
         """Send message to all connected clients."""
         dead = []
-        for writer in list(self.clients.keys()):
+        for writer in list(self.clients):
             try:
                 await async_write_msg(writer, msg)
             except Exception:
@@ -205,16 +205,16 @@ class SerialDaemon:
 
     def _remove_client(self, writer: asyncio.StreamWriter):
         """Remove a disconnected client."""
-        identity = self.clients.pop(writer, "?")
+        if writer in self.clients:
+            self.clients.remove(writer)
         try:
             writer.close()
         except Exception:
             pass
-        logger.info(f"Client [{identity}] disconnected. Active: {len(self.clients)}")
+        logger.info(f"Client disconnected. Active: {len(self.clients)}")
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a single client connection."""
-        identity = "?"
         try:
             # Expect hello message
             msg = await asyncio.wait_for(async_read_msg(reader), timeout=5.0)
@@ -223,9 +223,8 @@ class SerialDaemon:
                 writer.close()
                 return
 
-            identity = msg.get("identity", "?")
-            self.clients[writer] = identity
-            logger.info(f"Client [{identity}] connected. Active: {len(self.clients)}")
+            self.clients.append(writer)
+            logger.info(f"Client connected. Active: {len(self.clients)}")
 
             # Send hello ack
             await async_write_msg(writer, {
@@ -250,11 +249,11 @@ class SerialDaemon:
                     msg = await async_read_msg(reader)
                     if msg is None:
                         break
-                    await self._handle_client_msg(msg, identity, writer)
+                    await self._handle_client_msg(msg, writer)
                 except asyncio.IncompleteReadError:
                     break
                 except Exception as e:
-                    logger.error(f"Client [{identity}] error: {e}")
+                    logger.error(f"Client error: {e}")
                     break
 
         except asyncio.TimeoutError:
@@ -266,7 +265,7 @@ class SerialDaemon:
         finally:
             self._remove_client(writer)
 
-    async def _handle_client_msg(self, msg: dict, identity: str, writer: asyncio.StreamWriter):
+    async def _handle_client_msg(self, msg: dict, writer: asyncio.StreamWriter):
         """Process a message from a client."""
         msg_type = msg.get("type")
 
@@ -283,16 +282,7 @@ class SerialDaemon:
                 cmd = text.strip("\r\n")
                 if cmd:
                     ts = self._timestamp()
-                    self._log_write(f"[{ts}] [{identity}] {cmd}")
-
-            # Notify other clients about tagged input
-            notify_msg = {"type": "tagged_input", "identity": identity, "data": msg["data"]}
-            for w in list(self.clients.keys()):
-                if w is not writer:
-                    try:
-                        await async_write_msg(w, notify_msg)
-                    except Exception:
-                        pass
+                    self._log_write(f"[{ts}] {cmd}")
 
     async def run(self):
         """Main daemon entry point."""
