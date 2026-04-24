@@ -136,7 +136,23 @@ Logs:    3 files, 42.5 KB
 smtty die0
 ```
 
-Connects to the daemon for `die0`, replays scrollback history from the log, then enters live interactive mode. Input is logged with the command.
+Connects to the daemon for `die0`, replays scrollback history from the log, then enters live interactive mode.
+
+Use `--timestamps` / `-T` to show timestamps on all lines — history, input (on Enter), and received output:
+
+```bash
+smtty die0 --timestamps
+```
+
+Output looks like:
+```
+[16:30:01] Linux login: root
+[16:30:02] Password:
+[16:30:05] root@board:~# ls [16:30:05]
+[16:30:05] bin  etc  home  usr
+```
+
+Timestamps are off by default.
 
 #### smtty-agent — agent interactive mode
 

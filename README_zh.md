@@ -73,6 +73,14 @@ serial-mux start /dev/ttyUSB0 --baud 115200 --alias die0 --foreground
 smtty die0
 ```
 
+使用 `--timestamps` / `-T` 在所有行上显示时间戳（历史回放、输入回车、接收输出）：
+
+```bash
+smtty die0 --timestamps
+```
+
+默认不显示时间戳。
+
 连接串口（以 Agent 身份）：
 
 ```bash
@@ -114,6 +122,7 @@ die1     /dev/ttyUSB1   115200   0        2h 15m
 | 命令 | 说明 |
 |------|------|
 | `smtty <alias>` | 交互式客户端 |
+| `smtty <alias> --timestamps` | 交互模式，显示时间戳 |
 | `smtty-agent <alias>` | 交互式客户端 |
 | `smtty-agent <alias> --send 'cmd' --wait 'pattern' --timeout 5` | 非交互模式 |
 

@@ -91,6 +91,8 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
         print(f"\r\n--- serial-mux: attached to {alias} (Ctrl+] to detach) ---\r\n",
               end="", flush=True)
 
+        last_output_was_newline = True
+
         while True:
             readable, _, _ = select.select([sys.stdin, sock], [], [], 0.1)
 
@@ -105,6 +107,11 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
                 if ch == b"\x1d":
                     print("\r\n--- detached ---\r\n", end="", flush=True)
                     break
+
+                # If timestamps enabled, handle input newline
+                if timestamps and ch in (b"\r", b"\n"):
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    print(f" [{ts}]", end="", flush=True)
 
                 # Send to daemon
                 try:
@@ -122,7 +129,20 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
 
                     if msg["type"] == "output":
                         data = unb64(msg["data"])
-                        os.write(sys.stdout.fileno(), data)
+                        if not timestamps:
+                            os.write(sys.stdout.fileno(), data)
+                        else:
+                            # Character-by-character processing for timestamp insertion
+                            for b in data:
+                                if last_output_was_newline:
+                                    ts = datetime.now().strftime("[%H:%M:%S] ")
+                                    os.write(sys.stdout.fileno(), ts.encode("utf-8"))
+                                    last_output_was_newline = False
+                                
+                                char_bytes = bytes([b])
+                                os.write(sys.stdout.fileno(), char_bytes)
+                                if char_bytes == b"\n":
+                                    last_output_was_newline = True
 
                 except BlockingIOError:
                     pass
@@ -270,7 +290,7 @@ def main():
     parser.add_argument("--timeout", "-t", type=float, default=10.0,
                         help="Timeout in seconds for --wait (default: 10)")
     parser.add_argument("--timestamps", "-T", action="store_true", default=False,
-                        help="Show timestamps in history playback")
+                        help="Show timestamps on history, input and output lines")
 
     args = parser.parse_args()
     config = Config.load()
