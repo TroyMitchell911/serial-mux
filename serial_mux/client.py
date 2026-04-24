@@ -104,12 +104,15 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
             # Sanitize and deduplicate history lines
             cleaned = []
             seen_window = deque(maxlen=5)
+            _sgr_re = re.compile(r"\x1b\[[0-9;]*m")
             for line in raw_lines:
                 text = line if timestamps else _strip_timestamp(line)
                 text = _sanitize_history_line(text)
-                if not text or text in seen_window:
+                # Compare by plain text (no SGR, no trailing whitespace)
+                plain = _sgr_re.sub("", text).strip()
+                if not plain or plain in seen_window:
                     continue
-                seen_window.append(text)
+                seen_window.append(plain)
                 cleaned.append(text)
             for text in cleaned:
                 os.write(sys.stdout.fileno(), (text + "\r\n").encode("utf-8", errors="replace"))
@@ -137,7 +140,8 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
                 # If timestamps enabled, handle input newline
                 if timestamps and ch in (b"\r", b"\n"):
                     ts = datetime.now().strftime("%H:%M:%S")
-                    print(f" [{ts}]", end="", flush=True)
+                    # Use \r\n to ensure proper cursor movement in raw mode
+                    os.write(sys.stdout.fileno(), f" [{ts}]\r\n".encode("utf-8"))
 
                 # Send to daemon
                 try:

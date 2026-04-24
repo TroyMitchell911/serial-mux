@@ -277,12 +277,7 @@ class SerialDaemon:
                 self.ser.flush()
 
             # Log the command (detect newline to log as a line)
-            text = data.decode("utf-8", errors="replace")
-            if "\r" in text or "\n" in text:
-                cmd = text.strip("\r\n")
-                if cmd:
-                    ts = self._timestamp()
-                    self._log_write(f"[{ts}] {cmd}")
+            # DELETED: Redundant because serial echo is already captured by reader
 
     async def run(self):
         """Main daemon entry point."""
