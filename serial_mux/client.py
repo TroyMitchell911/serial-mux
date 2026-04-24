@@ -8,6 +8,7 @@ import socket
 import sys
 import termios
 import tty
+from collections import deque
 from pathlib import Path
 
 import re
@@ -62,6 +63,13 @@ def connect(config: Config, alias: str) -> socket.socket:
 
 
 _TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+_ANSI_RE = re.compile(
+    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC: \x1b]...(BEL or ST)
+    r"|\x1bP[^\x1b]*\x1b\\"                 # DCS: \x1bP...\x1b\\
+    r"|\x1b[\[\(][!-?]*[0-9;]*[ -/]*[@-~]"  # CSI: \x1b[...X
+    r"|\x1b[^\[\(\]P]"                       # ESC + single char
+    r"|[\x00-\x08\x0e-\x1f]"                # all C0 control chars except \t \n \r
+)
 
 
 def _strip_timestamp(line: str) -> str:
@@ -69,24 +77,41 @@ def _strip_timestamp(line: str) -> str:
     return _TS_RE.sub("", line)
 
 
+def _sanitize_history_line(line: str) -> str:
+    """Strip ANSI escapes, backspaces, and stray \\r from a history line."""
+    line = _ANSI_RE.sub("", line)
+    line = line.replace("\r", "")
+    return line
+
+
 def interactive_mode(config: Config, alias: str, timestamps: bool = False):
     """Interactive attach mode — like tio/minicom but multiplexed."""
     sock = connect(config, alias)
 
-    # Read history and print to stdout
-    msg = sync_read_msg(sock)
-    if msg and msg.get("type") == "history":
-        lines = msg.get("lines", [])
-        for line in lines:
-            print(line if timestamps else _strip_timestamp(line))
-        if lines:
-            sys.stdout.flush()
+    # Read history (will be replayed after entering raw mode)
+    history_msg = sync_read_msg(sock)
 
     # Save terminal state and switch to raw mode
     old_settings = termios.tcgetattr(sys.stdin.fileno())
     try:
         tty.setraw(sys.stdin.fileno())
         sock.setblocking(False)
+
+        # Replay history in raw mode so terminal handles it cleanly
+        if history_msg and history_msg.get("type") == "history":
+            raw_lines = history_msg.get("lines", [])
+            # Sanitize and deduplicate history lines
+            cleaned = []
+            seen_window = deque(maxlen=5)
+            for line in raw_lines:
+                text = line if timestamps else _strip_timestamp(line)
+                text = _sanitize_history_line(text)
+                if not text or text in seen_window:
+                    continue
+                seen_window.append(text)
+                cleaned.append(text)
+            for text in cleaned:
+                os.write(sys.stdout.fileno(), (text + "\r\n").encode("utf-8", errors="replace"))
 
         print(f"\r\n--- serial-mux: attached to {alias} (Ctrl+] to detach) ---\r\n",
               end="", flush=True)
