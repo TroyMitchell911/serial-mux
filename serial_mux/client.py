@@ -66,9 +66,10 @@ _TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
 _ANSI_RE = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC: \x1b]...(BEL or ST)
     r"|\x1bP[^\x1b]*\x1b\\"                 # DCS: \x1bP...\x1b\\
-    r"|\x1b[\[\(][!-?]*[0-9;]*[ -/]*[@-~]"  # CSI: \x1b[...X
+    r"|\x1b\[[!-?]*[0-9;]*[ -/]*[A-la-ln-~]"   # CSI except SGR (SGR ends with 'm')
+    r"|\x1b\([0-9;]*[A-Za-z@-~]"            # ESC ( charset select
     r"|\x1b[^\[\(\]P]"                       # ESC + single char
-    r"|[\x00-\x08\x0e-\x1f]"                # all C0 control chars except \t \n \r
+    r"|[\x00-\x08\x0e-\x1a\x1c-\x1f]"                # C0 control chars except \t \n \r \x1b(ESC)
 )
 
 
