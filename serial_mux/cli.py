@@ -13,6 +13,24 @@ from .config import Config
 from .protocol import sync_read_msg, sync_write_msg
 
 
+def format_uptime(start_time: float) -> str:
+    """Format uptime from a start timestamp to human-readable string."""
+    elapsed = int(time.time() - start_time)
+    if elapsed < 60:
+        return f"{elapsed}s"
+    elif elapsed < 3600:
+        m, s = divmod(elapsed, 60)
+        return f"{m}m {s}s"
+    elif elapsed < 86400:
+        h, rem = divmod(elapsed, 3600)
+        m = rem // 60
+        return f"{h}h {m}m"
+    else:
+        d, rem = divmod(elapsed, 86400)
+        h = rem // 3600
+        return f"{d}d {h}h"
+
+
 def resolve_alias(config: Config, alias_or_device: str) -> dict:
     """Resolve an alias to its info dict. Returns None if not found."""
     # Try as alias first
@@ -130,16 +148,18 @@ def cmd_list(args):
         print("No daemons running")
         return
 
-    # Count clients per daemon (by checking socket connections - approximate)
-    print(f"{'ALIAS':<12} {'DEVICE':<20} {'BAUD':<10} {'PID':<8} {'STATUS':<10}")
-    print("-" * 60)
+    print(f"{'ALIAS':<12} {'DEVICE':<20} {'BAUD':<10} {'PID':<8} {'CLIENTS':<9} {'UPTIME':<12} {'STATUS':<10}")
+    print("-" * 81)
     for info in infos:
         alias = info.get("alias", "?")
         device = info.get("device", "?")
         baud = info.get("baud", "?")
         pid = info.get("pid", "?")
         status = "running" if info["_running"] else "dead"
-        print(f"{alias:<12} {device:<20} {baud:<10} {pid:<8} {status:<10}")
+        clients = info.get("clients_count", "?")
+        start_time = info.get("start_time")
+        uptime = format_uptime(start_time) if start_time and info["_running"] else "-"
+        print(f"{alias:<12} {device:<20} {baud:<10} {pid:<8} {clients:<9} {uptime:<12} {status:<10}")
 
 
 def cmd_status(args):
@@ -159,6 +179,10 @@ def cmd_status(args):
     print(f"Baud:    {info.get('baud', '?')}")
     print(f"PID:     {pid}")
     print(f"Status:  {'running' if running else 'dead'}")
+    print(f"Clients: {info.get('clients_count', '?')}")
+    start_time = info.get("start_time")
+    if start_time and running:
+        print(f"Uptime:  {format_uptime(start_time)}")
     print(f"Socket:  {info.get('socket', '?')}")
 
     # Log info

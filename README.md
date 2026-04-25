@@ -106,9 +106,10 @@ serial-mux list
 
 Output:
 ```
-ALIAS        DEVICE               BAUD       PID      STATUS
-die0         /dev/ttyUSB0         115200     12345    running
-die1         /dev/ttyUSB1         115200     12346    running
+ALIAS        DEVICE               BAUD       PID      CLIENTS  UPTIME       STATUS
+---------------------------------------------------------------------------------
+die0         /dev/ttyUSB0         115200     12345    1        2h 15m       running
+die1         /dev/ttyUSB1         115200     12346    0        2h 15m       running
 ```
 
 #### Change baud rate

@@ -113,9 +113,10 @@ serial-mux stop die0
 `serial-mux list` 输出示例：
 
 ```
-ALIAS    DEVICE         BAUD     CLIENTS  UPTIME
-die0     /dev/ttyUSB0   115200   1        2h 15m
-die1     /dev/ttyUSB1   115200   0        2h 15m
+ALIAS        DEVICE               BAUD       PID      CLIENTS  UPTIME       STATUS
+---------------------------------------------------------------------------------
+die0         /dev/ttyUSB0         115200     12345    1        2h 15m       running
+die1         /dev/ttyUSB1         115200     12346    0        45s          running
 ```
 
 ### 客户端

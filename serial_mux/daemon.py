@@ -60,6 +60,8 @@ class SerialDaemon:
             "baud": self.baud,
             "pid": os.getpid(),
             "socket": str(self._sock_path()),
+            "start_time": self.start_time,
+            "clients_count": len(self.clients),
         }
         self._info_path().write_text(json.dumps(info, indent=2))
 
@@ -212,6 +214,7 @@ class SerialDaemon:
         except Exception:
             pass
         logger.info(f"Client disconnected. Active: {len(self.clients)}")
+        self._write_info()
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a single client connection."""
@@ -225,6 +228,7 @@ class SerialDaemon:
 
             self.clients.append(writer)
             logger.info(f"Client connected. Active: {len(self.clients)}")
+            self._write_info()
 
             # Send hello ack
             await async_write_msg(writer, {
