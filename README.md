@@ -108,8 +108,16 @@ Output:
 ```
 ALIAS        DEVICE               BAUD       PID      STATUS
 die0         /dev/ttyUSB0         115200     12345    running
-die1         /dev/ttyUSB1         115200     12350    running
+die1         /dev/ttyUSB1         115200     12346    running
 ```
+
+#### Change baud rate
+
+```bash
+serial-mux set-baud die0 9600
+```
+
+Changes the baud rate of a running daemon on the fly. The daemon updates the serial port, persists the new baud rate to its info file, and notifies all connected clients.
 
 #### Check daemon status
 

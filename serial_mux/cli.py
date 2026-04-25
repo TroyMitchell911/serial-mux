@@ -4,11 +4,13 @@ import argparse
 import json
 import os
 import signal
+import socket
 import sys
 import time
 from pathlib import Path
 
 from .config import Config
+from .protocol import sync_read_msg, sync_write_msg
 
 
 def resolve_alias(config: Config, alias_or_device: str) -> dict:
@@ -167,6 +169,62 @@ def cmd_status(args):
         print(f"Logs:    {len(logs)} files, {total_size / 1024:.1f} KB")
 
 
+def cmd_set_baud(args):
+    """Change baud rate of a running daemon."""
+    config = Config.load()
+    info = resolve_alias(config, args.alias)
+    if not info:
+        print(f"Error: No daemon found for '{args.alias}'")
+        sys.exit(1)
+
+    pid = info.get("pid", 0)
+    alias = info.get("alias", args.alias)
+
+    if not is_running(pid):
+        print(f"Error: Daemon '{alias}' is not running")
+        sys.exit(1)
+
+    sock_path = info.get("socket")
+    if not sock_path or not Path(sock_path).exists():
+        print(f"Error: Socket not found for '{alias}'")
+        sys.exit(1)
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(sock_path)
+        sock.settimeout(5.0)
+
+        # Handshake
+        sync_write_msg(sock, {"type": "hello"})
+        resp = sync_read_msg(sock)
+        if not resp or resp.get("type") != "hello_ack":
+            print(f"Error: Unexpected response from daemon")
+            sys.exit(1)
+
+        # Drain the history message
+        sync_read_msg(sock)
+
+        # Send set_baud
+        sync_write_msg(sock, {"type": "set_baud", "baud": args.baud})
+        resp = sync_read_msg(sock)
+        if resp and resp.get("type") == "baud_ack":
+            print(f"Baud rate changed: {info.get('baud')} -> {resp['baud']}")
+        elif resp and resp.get("type") == "error":
+            print(f"Error: {resp.get('message')}")
+            sys.exit(1)
+        else:
+            print(f"Error: Unexpected response: {resp}")
+            sys.exit(1)
+    except socket.timeout:
+        print(f"Error: Timeout communicating with daemon")
+        sys.exit(1)
+    except ConnectionRefusedError:
+        print(f"Error: Cannot connect to daemon '{alias}'")
+        sys.exit(1)
+    finally:
+        sock.close()
+
+
 def main():
     parser = argparse.ArgumentParser(prog="serial-mux", description="Serial port multiplexer")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -192,6 +250,12 @@ def main():
     p_status = sub.add_parser("status", help="Show daemon status")
     p_status.add_argument("alias", help="Alias or device path")
     p_status.set_defaults(func=cmd_status)
+
+    # set-baud
+    p_baud = sub.add_parser("set-baud", help="Change baud rate of a running daemon")
+    p_baud.add_argument("alias", help="Alias or device path")
+    p_baud.add_argument("baud", type=int, help="New baud rate")
+    p_baud.set_defaults(func=cmd_set_baud)
 
     args = parser.parse_args()
     args.func(args)

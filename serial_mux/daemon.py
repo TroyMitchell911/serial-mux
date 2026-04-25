@@ -279,6 +279,29 @@ class SerialDaemon:
             # Log the command (detect newline to log as a line)
             # DELETED: Redundant because serial echo is already captured by reader
 
+        elif msg_type == "set_baud":
+            new_baud = msg.get("baud")
+            if not isinstance(new_baud, int) or new_baud <= 0:
+                await async_write_msg(writer, {
+                    "type": "error",
+                    "message": f"Invalid baud rate: {new_baud}",
+                })
+                return
+            old_baud = self.baud
+            try:
+                self.ser.baudrate = new_baud
+                self.baud = new_baud
+                self._write_info()
+                logger.info(f"Baud rate changed: {old_baud} -> {new_baud}")
+                # Notify all connected clients
+                await self._broadcast({"type": "baud_ack", "baud": new_baud})
+            except (serial.SerialException, OSError) as e:
+                logger.error(f"Failed to set baud rate to {new_baud}: {e}")
+                await async_write_msg(writer, {
+                    "type": "error",
+                    "message": f"Failed to set baud rate: {e}",
+                })
+
     async def run(self):
         """Main daemon entry point."""
         self.running = True

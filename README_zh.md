@@ -108,6 +108,7 @@ serial-mux stop die0
 | `serial-mux stop <alias>` | 停止指定 daemon |
 | `serial-mux list` | 列出所有运行中的串口 |
 | `serial-mux status <alias>` | 查看指定串口的详细状态 |
+| `serial-mux set-baud <alias> <baud>` | 动态修改运行中 daemon 的波特率 |
 
 `serial-mux list` 输出示例：
 

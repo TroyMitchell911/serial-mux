@@ -8,12 +8,14 @@ Client -> Daemon:
   {"type": "hello"}
   {"type": "input", "data": "<base64 encoded bytes>"}
   {"type": "history_request"}
+  {"type": "set_baud", "baud": <int>}
 
 Daemon -> Client:
   {"type": "hello_ack", "alias": "...", "device": "...", "baud": ...}
   {"type": "output", "data": "<base64 encoded bytes>"}
   {"type": "history", "lines": ["...", ...]}
   {"type": "error", "message": "..."}
+  {"type": "baud_ack", "baud": <int>}
 """
 
 import base64
