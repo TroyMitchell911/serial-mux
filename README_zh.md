@@ -8,6 +8,7 @@
 
 - 一个串口，多个客户端同时访问
 - daemon 后台驻留，独占串口，通过 Unix socket 扇出数据
+- **可选 SSH 绑定** — SSH 优先，串口作为后备
 - 交互式客户端 `smtty` / `smtty-agent`
 - 非交互模式支持发送命令、等待匹配、echo 校验与自动重试
 - alias 机制解耦设备路径，拔插不影响使用
@@ -59,6 +60,13 @@ serial-mux start /dev/ttyUSB0 --baud 115200 --alias die0
 
 daemon 会 double-fork 到后台驻留，独占串口设备。
 
+启动时绑定 SSH：
+
+```bash
+serial-mux start /dev/ttyUSB0 --alias die0 --ssh root@192.168.1.100
+serial-mux start /dev/ttyUSB0 --alias die0 --ssh k3_die0   # 使用 ~/.ssh/config 中的 hostname
+```
+
 如需前台调试：
 
 ```bash
@@ -109,14 +117,16 @@ serial-mux stop die0
 | `serial-mux list` | 列出所有运行中的串口 |
 | `serial-mux status <alias>` | 查看指定串口的详细状态 |
 | `serial-mux set-baud <alias> <baud>` | 动态修改运行中 daemon 的波特率 |
+| `serial-mux ssh-bind <alias> <target>` | 为运行中的 daemon 绑定 SSH（user@host 或 ssh config hostname） |
+| `serial-mux ssh-unbind <alias>` | 解除 SSH 绑定，回退到串口 |
 
 `serial-mux list` 输出示例：
 
 ```
-ALIAS        DEVICE               BAUD       PID      CLIENTS  UPTIME       STATUS
----------------------------------------------------------------------------------
-die0         /dev/ttyUSB0         115200     12345    1        2h 15m       running
-die1         /dev/ttyUSB1         115200     12346    0        45s          running
+ALIAS        DEVICE               BAUD       PID      CLIENTS  UPTIME       STATUS     SSH
+-----------------------------------------------------------------------------------------------------
+die0         /dev/ttyUSB0         115200     12345    1        2h 15m       running    root@192.168.1.100
+die1         /dev/ttyUSB1         115200     12346    0        45s          running    -
 ```
 
 ### 客户端
@@ -147,6 +157,22 @@ smtty-agent die0 --send "ls" --wait "root@" --timeout 5
 5. 等待 `--wait` 指定的 pattern 出现，或超时退出
 6. 成功 → stdout 输出命令结果，静默退出（exit code 0）
 7. 5 次 echo 校验均失败 → 报错退出（非零 exit code）
+
+### SSH 传输层
+
+daemon 绑定 SSH 后，客户端自动优先使用 SSH。交互模式的 attach banner 会显示当前传输层：
+
+```
+--- serial-mux: attached to die0 [ssh] (Ctrl+] to detach) ---
+```
+
+非交互模式使用 SSH 时**不需要 echo 校验** — 网络层保证可靠传输，无需重试。SSH 连接断开时 daemon 自动切换到串口并通知所有客户端。
+
+SSH target 支持两种格式：
+- `user@host` — 直接使用
+- 裸 hostname — 从 `~/.ssh/config` 中查找验证，不存在则拒绝
+
+> **注意：** SSH 使用 `BatchMode=yes`，仅支持密钥认证。密码登录会被自动拒绝。使用前请先配好 SSH 密钥。
 
 ### echo 校验机制
 
@@ -189,7 +215,8 @@ alias 映射存储在 `~/.serial-mux/run/<alias>.json`：
   "device": "/dev/ttyUSB0",
   "baud": 115200,
   "pid": 12345,
-  "socket": "/home/user/.serial-mux/sock/die0.sock"
+  "socket": "/home/user/.serial-mux/sock/die0.sock",
+  "ssh": "root@192.168.1.100"
 }
 ```
 
@@ -203,6 +230,8 @@ alias 映射存储在 `~/.serial-mux/run/<alias>.json`：
 log_retention_days: 7       # 日志保留天数
 default_baud: 115200        # 默认波特率
 scrollback_lines: 5000      # attach 时回放的历史行数
+ssh_connect_timeout: 3      # SSH ConnectTimeout（秒）
+ssh_probe_timeout: 5        # SSH 探测等待时间（秒），超时判定连接成功
 ```
 
 所有配置项都有合理默认值，配置文件可选。daemon 启动时读取配置。

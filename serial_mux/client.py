@@ -59,7 +59,10 @@ def connect(config: Config, alias: str) -> socket.socket:
         print(f"Error: Unexpected response from daemon", file=sys.stderr)
         sys.exit(1)
 
-    return sock
+    # Store transport type for later use
+    transport_type = msg.get("transport", "serial")
+
+    return sock, transport_type
 
 
 _TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
@@ -87,7 +90,7 @@ def _sanitize_history_line(line: str) -> str:
 
 def interactive_mode(config: Config, alias: str, timestamps: bool = False):
     """Interactive attach mode — like tio/minicom but multiplexed."""
-    sock = connect(config, alias)
+    sock, transport = connect(config, alias)
 
     # Read history (will be replayed after entering raw mode)
     history_msg = sync_read_msg(sock)
@@ -117,7 +120,7 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
             for text in cleaned:
                 os.write(sys.stdout.fileno(), (text + "\r\n").encode("utf-8", errors="replace"))
 
-        print(f"\r\n--- serial-mux: attached to {alias} (Ctrl+] to detach) ---\r\n",
+        print(f"\r\n--- serial-mux: attached to {alias} [{transport}] (Ctrl+] to detach) ---\r\n",
               end="", flush=True)
 
         last_output_was_newline = True
@@ -193,14 +196,16 @@ def noninteractive_mode(config: Config, alias: str,
     """Non-interactive mode: send command, verify echo, wait for pattern."""
     import time
 
-    sock = connect(config, alias)
+    sock, transport = connect(config, alias)
 
     # Drain history
     msg = sync_read_msg(sock)  # history message
 
     sock.setblocking(False)
 
-    max_retries = 5
+    use_echo_verify = (transport != "ssh")
+
+    max_retries = 5 if use_echo_verify else 1
     send_success = False
     all_output = ""  # Accumulate ALL output from the moment we send
 
@@ -214,6 +219,11 @@ def noninteractive_mode(config: Config, alias: str,
         except (BrokenPipeError, ConnectionResetError):
             print(f"Error: Connection lost", file=sys.stderr)
             sys.exit(1)
+
+        if not use_echo_verify:
+            # SSH transport: no echo verification needed
+            send_success = True
+            break
 
         # Wait for echo and verify
         all_output = ""

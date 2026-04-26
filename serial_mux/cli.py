@@ -93,7 +93,7 @@ def cmd_start(args):
 
     # Import and start daemon
     from .daemon import start_daemon
-    start_daemon(device, baud, alias, foreground=args.foreground)
+    start_daemon(device, baud, alias, foreground=args.foreground, ssh_target=getattr(args, 'ssh', None))
 
 
 def cmd_stop(args):
@@ -148,8 +148,8 @@ def cmd_list(args):
         print("No daemons running")
         return
 
-    print(f"{'ALIAS':<12} {'DEVICE':<20} {'BAUD':<10} {'PID':<8} {'CLIENTS':<9} {'UPTIME':<12} {'STATUS':<10}")
-    print("-" * 81)
+    print(f"{'ALIAS':<12} {'DEVICE':<20} {'BAUD':<10} {'PID':<8} {'CLIENTS':<9} {'UPTIME':<12} {'STATUS':<10} {'SSH':<20}")
+    print("-" * 101)
     for info in infos:
         alias = info.get("alias", "?")
         device = info.get("device", "?")
@@ -159,7 +159,8 @@ def cmd_list(args):
         clients = info.get("clients_count", "?")
         start_time = info.get("start_time")
         uptime = format_uptime(start_time) if start_time and info["_running"] else "-"
-        print(f"{alias:<12} {device:<20} {baud:<10} {pid:<8} {clients:<9} {uptime:<12} {status:<10}")
+        ssh = info.get("ssh") or "-"
+        print(f"{alias:<12} {device:<20} {baud:<10} {pid:<8} {clients:<9} {uptime:<12} {status:<10} {ssh:<20}")
 
 
 def cmd_status(args):
@@ -184,6 +185,8 @@ def cmd_status(args):
     if start_time and running:
         print(f"Uptime:  {format_uptime(start_time)}")
     print(f"Socket:  {info.get('socket', '?')}")
+    ssh = info.get("ssh")
+    print(f"SSH:     {ssh if ssh else 'none'}")
 
     # Log info
     log_dir = config.logs_dir / alias
@@ -249,6 +252,67 @@ def cmd_set_baud(args):
         sock.close()
 
 
+def _send_daemon_msg(alias: str, msg: dict) -> dict:
+    """Connect to daemon, handshake, send a message, return response."""
+    config = Config.load()
+    info = resolve_alias(config, alias)
+    if not info:
+        print(f"Error: No daemon found for '{alias}'")
+        sys.exit(1)
+    pid = info.get("pid", 0)
+    if not is_running(pid):
+        print(f"Error: Daemon '{info.get('alias', alias)}' is not running")
+        sys.exit(1)
+    sock_path = info.get("socket")
+    if not sock_path or not Path(sock_path).exists():
+        print(f"Error: Socket not found for '{info.get('alias', alias)}'")
+        sys.exit(1)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(sock_path)
+        sock.settimeout(5.0)
+        sync_write_msg(sock, {"type": "hello"})
+        resp = sync_read_msg(sock)
+        if not resp or resp.get("type") != "hello_ack":
+            print(f"Error: Unexpected response from daemon")
+            sys.exit(1)
+        sync_read_msg(sock)  # drain history
+        sync_write_msg(sock, msg)
+        resp = sync_read_msg(sock)
+        return resp
+    except socket.timeout:
+        print(f"Error: Timeout communicating with daemon")
+        sys.exit(1)
+    except ConnectionRefusedError:
+        print(f"Error: Cannot connect to daemon")
+        sys.exit(1)
+    finally:
+        sock.close()
+
+
+def cmd_ssh_bind(args):
+    """Bind SSH to a running daemon."""
+    resp = _send_daemon_msg(args.alias, {"type": "ssh_bind", "target": args.ssh_target})
+    if resp and resp.get("ok"):
+        print(resp.get("message", "SSH bound"))
+    elif resp and resp.get("type") == "ssh_bind_ack":
+        print(f"Error: {resp.get('message', 'SSH bind failed')}")
+        sys.exit(1)
+    else:
+        print(f"Error: Unexpected response: {resp}")
+        sys.exit(1)
+
+
+def cmd_ssh_unbind(args):
+    """Unbind SSH from a running daemon."""
+    resp = _send_daemon_msg(args.alias, {"type": "ssh_unbind"})
+    if resp and resp.get("ok"):
+        print(resp.get("message", "SSH unbound"))
+    else:
+        print(f"Error: Unexpected response: {resp}")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="serial-mux", description="Serial port multiplexer")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -259,6 +323,7 @@ def main():
     p_start.add_argument("--baud", "-b", type=int, help="Baud rate (default from config)")
     p_start.add_argument("--alias", "-a", help="Alias name (default: device basename)")
     p_start.add_argument("--foreground", "-f", action="store_true", help="Run in foreground")
+    p_start.add_argument("--ssh", default=None, help="SSH target (user@host or ssh-config hostname)")
     p_start.set_defaults(func=cmd_start)
 
     # stop
@@ -280,6 +345,17 @@ def main():
     p_baud.add_argument("alias", help="Alias or device path")
     p_baud.add_argument("baud", type=int, help="New baud rate")
     p_baud.set_defaults(func=cmd_set_baud)
+
+    # ssh-bind
+    p_ssh_bind = sub.add_parser("ssh-bind", help="Bind SSH to a running daemon")
+    p_ssh_bind.add_argument("alias", help="Alias or device path")
+    p_ssh_bind.add_argument("ssh_target", help="SSH target (user@host or ssh-config hostname)")
+    p_ssh_bind.set_defaults(func=cmd_ssh_bind)
+
+    # ssh-unbind
+    p_ssh_unbind = sub.add_parser("ssh-unbind", help="Unbind SSH from a running daemon")
+    p_ssh_unbind.add_argument("alias", help="Alias or device path")
+    p_ssh_unbind.set_defaults(func=cmd_ssh_unbind)
 
     args = parser.parse_args()
     args.func(args)

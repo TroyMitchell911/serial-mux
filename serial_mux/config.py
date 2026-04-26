@@ -12,6 +12,8 @@ class Config:
     log_retention_days: int = 7
     default_baud: int = 115200
     scrollback_lines: int = 5000
+    ssh_connect_timeout: int = 3
+    ssh_probe_timeout: int = 5
 
     # Derived paths
     base_dir: Path = field(default_factory=lambda: Path.home() / ".serial-mux")
@@ -48,5 +50,9 @@ class Config:
                 cfg.default_baud = int(data["default_baud"])
             if "scrollback_lines" in data:
                 cfg.scrollback_lines = int(data["scrollback_lines"])
+            if "ssh_connect_timeout" in data:
+                cfg.ssh_connect_timeout = int(data["ssh_connect_timeout"])
+            if "ssh_probe_timeout" in data:
+                cfg.ssh_probe_timeout = int(data["ssh_probe_timeout"])
         cfg.ensure_dirs()
         return cfg

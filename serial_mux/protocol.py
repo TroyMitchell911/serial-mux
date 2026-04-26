@@ -9,13 +9,17 @@ Client -> Daemon:
   {"type": "input", "data": "<base64 encoded bytes>"}
   {"type": "history_request"}
   {"type": "set_baud", "baud": <int>}
+  {"type": "ssh_bind", "target": "<user@host or ssh-config-host>"}
+  {"type": "ssh_unbind"}
 
 Daemon -> Client:
-  {"type": "hello_ack", "alias": "...", "device": "...", "baud": ...}
+  {"type": "hello_ack", "alias": "...", "device": "...", "baud": ..., "transport": "ssh"|"serial"}
   {"type": "output", "data": "<base64 encoded bytes>"}
   {"type": "history", "lines": ["...", ...]}
   {"type": "error", "message": "..."}
   {"type": "baud_ack", "baud": <int>}
+  {"type": "ssh_bind_ack", "target": "...", "ok": true/false, "message": "..."}
+  {"type": "transport_changed", "transport": "ssh"|"serial"}
 """
 
 import base64

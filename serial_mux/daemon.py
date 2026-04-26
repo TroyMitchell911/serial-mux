@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+import re
 
 import serial
 
@@ -26,6 +27,31 @@ from .protocol import (
 logger = logging.getLogger("serial-mux-daemon")
 
 
+def validate_ssh_target(target: str) -> tuple[bool, str]:
+    """Validate an SSH target. If bare hostname (no @), check ~/.ssh/config."""
+    if not target or not target.strip():
+        return False, "Empty SSH target"
+    target = target.strip()
+    if "@" in target:
+        # user@host format — accept as-is
+        return True, ""
+    # Bare hostname — check ~/.ssh/config
+    ssh_config = Path.home() / ".ssh" / "config"
+    if not ssh_config.exists():
+        return False, f"~/.ssh/config not found; cannot validate hostname '{target}'"
+    try:
+        text = ssh_config.read_text()
+        for line in text.splitlines():
+            line = line.strip()
+            if re.match(r"^Host\s+", line, re.IGNORECASE):
+                hosts = line.split()[1:]
+                if target in hosts:
+                    return True, ""
+        return False, f"Host '{target}' not found in ~/.ssh/config"
+    except Exception as e:
+        return False, f"Error reading ~/.ssh/config: {e}"
+
+
 class SerialDaemon:
     def __init__(self, device: str, baud: int, alias: str, config: Config):
         self.device = device
@@ -39,6 +65,9 @@ class SerialDaemon:
         self.log_date: Optional[str] = None
         self.running = False
         self.start_time = time.time()
+        self.ssh_target: Optional[str] = None
+        self._ssh_process: Optional[asyncio.subprocess.Process] = None
+        self._ssh_reader_task: Optional[asyncio.Task] = None
 
     def _info_path(self) -> Path:
         return self.config.run_dir / f"{self.alias}.json"
@@ -62,6 +91,7 @@ class SerialDaemon:
             "socket": str(self._sock_path()),
             "start_time": self.start_time,
             "clients_count": len(self.clients),
+            "ssh": self.ssh_target,
         }
         self._info_path().write_text(json.dumps(info, indent=2))
 
@@ -236,6 +266,7 @@ class SerialDaemon:
                 "alias": self.alias,
                 "device": self.device,
                 "baud": self.baud,
+                "transport": "ssh" if self._ssh_is_connected() else "serial",
             })
 
             # Send history
@@ -275,10 +306,20 @@ class SerialDaemon:
 
         if msg_type == "input":
             data = unb64(msg["data"])
-            # Write to serial
-            if self.ser and self.ser.is_open:
-                self.ser.write(data)
-                self.ser.flush()
+            # Write to SSH if connected, else serial
+            if self._ssh_is_connected():
+                try:
+                    self._ssh_process.stdin.write(data)
+                    await self._ssh_process.stdin.drain()
+                except Exception as e:
+                    logger.warning(f"SSH write failed: {e}, falling back to serial")
+                    if self.ser and self.ser.is_open:
+                        self.ser.write(data)
+                        self.ser.flush()
+            else:
+                if self.ser and self.ser.is_open:
+                    self.ser.write(data)
+                    self.ser.flush()
 
             # Log the command (detect newline to log as a line)
             # DELETED: Redundant because serial echo is already captured by reader
@@ -305,6 +346,25 @@ class SerialDaemon:
                     "type": "error",
                     "message": f"Failed to set baud rate: {e}",
                 })
+
+        elif msg_type == "ssh_bind":
+            target = msg.get("target", "")
+            ok, message = await self.bind_ssh(target)
+            await async_write_msg(writer, {
+                "type": "ssh_bind_ack",
+                "target": target,
+                "ok": ok,
+                "message": message,
+            })
+
+        elif msg_type == "ssh_unbind":
+            await self.unbind_ssh()
+            await async_write_msg(writer, {
+                "type": "ssh_bind_ack",
+                "target": "",
+                "ok": True,
+                "message": "SSH unbound",
+            })
 
     async def run(self):
         """Main daemon entry point."""
@@ -334,6 +394,12 @@ class SerialDaemon:
         logger.info(f"Daemon started: {self.alias} -> {self.device} @ {self.baud}")
         logger.info(f"Socket: {sock_path}")
 
+        # Start SSH if configured
+        if self.ssh_target:
+            ok, msg = await self.bind_ssh(self.ssh_target)
+            if not ok:
+                logger.warning(f"Failed to start SSH: {msg}")
+
         # Start serial reader
         serial_task = asyncio.create_task(self._serial_reader())
 
@@ -349,6 +415,7 @@ class SerialDaemon:
         finally:
             self.running = False
             serial_task.cancel()
+            await self._cleanup_ssh()
             try:
                 await serial_task
             except asyncio.CancelledError:
@@ -361,6 +428,108 @@ class SerialDaemon:
                 self.log_file.close()
             self._cleanup_files()
             logger.info("Daemon stopped.")
+
+    def _ssh_is_connected(self) -> bool:
+        """Check if SSH subprocess is alive."""
+        return (self._ssh_process is not None
+                and self._ssh_process.returncode is None)
+
+    async def bind_ssh(self, target: str) -> tuple[bool, str]:
+        """Validate and start SSH connection."""
+        # Validate target
+        ok, err = validate_ssh_target(target)
+        if not ok:
+            return False, err
+
+        # Kill existing SSH if any
+        await self._cleanup_ssh()
+
+        try:
+            self._ssh_process = await asyncio.create_subprocess_exec(
+                "ssh", "-tt",
+                "-o", "BatchMode=yes",
+                "-o", f"ConnectTimeout={self.config.ssh_connect_timeout}",
+                target,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            # Wait long enough to cover ConnectTimeout + handshake failures
+            try:
+                await asyncio.wait_for(self._ssh_process.wait(), timeout=self.config.ssh_probe_timeout)
+                # If we get here, SSH exited — read stderr for reason
+                stderr = await self._ssh_process.stderr.read()
+                err_msg = stderr.decode("utf-8", errors="replace").strip()
+                self._ssh_process = None
+                return False, f"SSH failed: {err_msg}"
+            except asyncio.TimeoutError:
+                # Still running after 8s — connection succeeded
+                pass
+            self.ssh_target = target
+            self._ssh_reader_task = asyncio.create_task(self._ssh_reader())
+            self._write_info()
+            logger.info(f"SSH bound to {target}")
+            await self._broadcast({"type": "transport_changed", "transport": "ssh"})
+            return True, f"SSH connected to {target}"
+        except Exception as e:
+            logger.error(f"Failed to start SSH to {target}: {e}")
+            self._ssh_process = None
+            return False, str(e)
+
+    async def unbind_ssh(self):
+        """Kill SSH subprocess and clear state."""
+        had_ssh = self._ssh_is_connected()
+        await self._cleanup_ssh()
+        self.ssh_target = None
+        self._write_info()
+        if had_ssh:
+            await self._broadcast({"type": "transport_changed", "transport": "serial"})
+
+    async def _cleanup_ssh(self):
+        """Terminate SSH process and reader task."""
+        if self._ssh_reader_task:
+            self._ssh_reader_task.cancel()
+            try:
+                await self._ssh_reader_task
+            except asyncio.CancelledError:
+                pass
+            self._ssh_reader_task = None
+        if self._ssh_process:
+            try:
+                self._ssh_process.kill()
+                await self._ssh_process.wait()
+            except Exception:
+                pass
+            self._ssh_process = None
+
+    async def _ssh_reader(self):
+        """Read from SSH stdout and fan out to all clients."""
+        line_buf = bytearray()
+        try:
+            while self.running and self._ssh_is_connected():
+                data = await self._ssh_process.stdout.read(4096)
+                if not data:
+                    break
+                msg = {"type": "output", "data": b64(data)}
+                await self._broadcast(msg)
+                # Log line by line
+                for byte in data:
+                    if byte == ord("\n"):
+                        line = line_buf.decode("utf-8", errors="replace").rstrip("\r")
+                        ts = self._timestamp()
+                        self._log_write(f"[{ts}] {line}")
+                        line_buf.clear()
+                    else:
+                        line_buf.append(byte)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.error(f"SSH reader error: {e}")
+
+        # SSH died — notify clients
+        logger.warning("SSH process ended, falling back to serial")
+        self._ssh_process = None
+        await self._broadcast({"type": "transport_changed", "transport": "serial"})
 
     def _shutdown(self):
         """Signal handler to initiate shutdown."""
@@ -400,7 +569,7 @@ def daemonize():
     os.close(devnull)
 
 
-def start_daemon(device: str, baud: int, alias: str, foreground: bool = False):
+def start_daemon(device: str, baud: int, alias: str, foreground: bool = False, ssh_target: str = None):
     """Start the daemon process."""
     config = Config.load()
 
@@ -425,7 +594,37 @@ def start_daemon(device: str, baud: int, alias: str, foreground: bool = False):
             print(f"Error: Cannot open {device}: {e}")
             sys.exit(1)
 
-        print(f"Starting daemon: {alias} -> {device} @ {baud}", flush=True)
+        # Validate SSH target BEFORE daemonizing so errors are visible
+        if ssh_target:
+            ok, err = validate_ssh_target(ssh_target)
+            if not ok:
+                print(f"Error: {err}")
+                sys.exit(1)
+            import subprocess
+            print(f"Connecting SSH to {ssh_target}...", flush=True)
+            try:
+                probe = subprocess.run(
+                    ["ssh", "-tt",
+                     "-o", "BatchMode=yes",
+                     "-o", f"ConnectTimeout={config.ssh_connect_timeout}",
+                     ssh_target, "echo", "__serial_mux_probe__"],
+                    capture_output=True, timeout=config.ssh_probe_timeout + 2,
+                )
+            except subprocess.TimeoutExpired:
+                print(f"Error: SSH connection to {ssh_target} timed out")
+                sys.exit(1)
+            if probe.returncode != 0:
+                stderr = probe.stderr.decode("utf-8", errors="replace").strip()
+                print(f"Error: SSH connection failed: {stderr}")
+                sys.exit(1)
+            print(f"SSH to {ssh_target} OK", flush=True)
+
+        parts = []
+        if device:
+            parts.append(f"{device} @ {baud}")
+        if ssh_target:
+            parts.append(f"ssh:{ssh_target}")
+        print(f"Starting daemon: {alias} -> {', '.join(parts)}", flush=True)
         daemonize()
 
     # Setup logging
@@ -441,6 +640,8 @@ def start_daemon(device: str, baud: int, alias: str, foreground: bool = False):
         )
 
     daemon = SerialDaemon(device, baud, alias, config)
+    if ssh_target:
+        daemon.ssh_target = ssh_target
     try:
         asyncio.run(daemon.run())
     except Exception as e:

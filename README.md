@@ -9,12 +9,12 @@ Think `tio` or `minicom`, but multiplexed — two people (or a person and an AI 
 ## Architecture
 
 ```
-Serial Device (/dev/ttyUSBx)
-    ^
-    |  pyserial (exclusive access)
-    v
+Serial Device (/dev/ttyUSBx)          SSH Target (user@host)
+    ^                                      ^
+    |  pyserial (exclusive access)         |  ssh -tt (PTY)
+    v                                      v
 serial-mux daemon (one per device, background process)
-    |
+    |             SSH preferred, serial fallback
     +---> Log file (~/.serial-mux/logs/<alias>/YYYY-MM-DD.log)
     |
     +---> Unix socket (~/.serial-mux/sock/<alias>.sock)
@@ -89,6 +89,29 @@ serial-mux start /dev/ttyUSB0 --baud 115200 --alias die0
 - `--baud` / `-b` — baud rate (default: `115200`, configurable)
 - `--alias` / `-a` — friendly name (default: device basename, e.g. `ttyUSB0`)
 - `--foreground` / `-f` — don't daemonize, run in foreground (useful for debugging)
+- `--ssh` — optional SSH target to bind at start (e.g. `user@192.168.1.1` or an `~/.ssh/config` hostname)
+
+Start with SSH bound:
+
+```bash
+serial-mux start /dev/ttyUSB0 --alias die0 --ssh root@192.168.1.100
+serial-mux start /dev/ttyUSB0 --alias die0 --ssh k3_die0   # uses ~/.ssh/config
+```
+
+#### Bind/unbind SSH at runtime
+
+```bash
+# Bind SSH to a running daemon
+serial-mux ssh-bind die0 root@192.168.1.100
+serial-mux ssh-bind die0 k3_die0   # hostname from ~/.ssh/config
+
+# Unbind SSH (clients fall back to serial)
+serial-mux ssh-unbind die0
+```
+
+When SSH is bound, clients prefer SSH for I/O. If the SSH connection dies, the daemon falls back to serial automatically. Bare hostnames (without `@`) are validated against `~/.ssh/config` before connecting.
+
+> **Note:** SSH uses `BatchMode=yes` — only key-based authentication is supported. Password prompts are automatically rejected. Set up SSH keys before using this feature.
 
 #### Stop a daemon
 
@@ -106,10 +129,10 @@ serial-mux list
 
 Output:
 ```
-ALIAS        DEVICE               BAUD       PID      CLIENTS  UPTIME       STATUS
----------------------------------------------------------------------------------
-die0         /dev/ttyUSB0         115200     12345    1        2h 15m       running
-die1         /dev/ttyUSB1         115200     12346    0        2h 15m       running
+ALIAS        DEVICE               BAUD       PID      CLIENTS  UPTIME       STATUS     SSH
+-----------------------------------------------------------------------------------------------------
+die0         /dev/ttyUSB0         115200     12345    1        2h 15m       running    root@192.168.1.100
+die1         /dev/ttyUSB1         115200     12346    0        2h 15m       running    -
 ```
 
 #### Change baud rate
@@ -134,6 +157,7 @@ Baud:    115200
 PID:     12345
 Status:  running
 Socket:  /home/user/.serial-mux/sock/die0.sock
+SSH:     root@192.168.1.100
 Logs:    3 files, 42.5 KB
 ```
 
@@ -192,6 +216,16 @@ Flags:
 - `--wait` / `-w` — regex/string pattern to wait for in output
 - `--timeout` / `-t` — seconds to wait for the pattern (default: 10)
 
+#### SSH transport
+
+When the daemon has SSH bound, clients automatically use the SSH transport. The interactive attach banner shows the current transport:
+
+```
+--- serial-mux: attached to die0 [ssh] (Ctrl+] to detach) ---
+```
+
+In non-interactive mode with SSH transport, **echo verification is skipped** — the network layer guarantees reliable delivery, so no retry is needed. If SSH drops mid-session, the daemon switches to serial automatically and notifies all clients.
+
 #### Echo verification
 
 Non-interactive mode verifies that the serial device echoed the command back correctly. If the echo doesn't match (e.g. due to line noise or buffer issues), it retries up to 5 times. If all retries fail, it exits with a non-zero status.
@@ -236,6 +270,12 @@ default_baud: 115200
 
 # Number of history lines replayed when a client attaches
 scrollback_lines: 5000
+
+# SSH ConnectTimeout passed to ssh (seconds)
+ssh_connect_timeout: 3
+
+# How long to wait for SSH to establish before declaring failure (seconds)
+ssh_probe_timeout: 5
 ```
 
 ## File Layout
@@ -269,7 +309,8 @@ scrollback_lines: 5000
   "device": "/dev/ttyUSB0",
   "baud": 115200,
   "pid": 12345,
-  "socket": "/home/user/.serial-mux/sock/die0.sock"
+  "socket": "/home/user/.serial-mux/sock/die0.sock",
+  "ssh": "root@192.168.1.100"
 }
 ```
 
