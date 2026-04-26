@@ -154,7 +154,7 @@ die1         /dev/ttyUSB1         115200     12346    0        2h 15m       runn
 serial-mux set-baud die0 9600
 ```
 
-Changes the baud rate of a running daemon on the fly. The daemon updates the serial port, persists the new baud rate to its info file, and notifies all connected clients.
+Changes the baud rate of a running daemon on the fly. The daemon updates the serial port, persists the new baud rate to its info file, and notifies all connected clients. Requires an active serial connection — returns an error in SSH-only mode.
 
 #### Check daemon status
 
@@ -168,6 +168,8 @@ Alias:   die0
 Device:  /dev/ttyUSB0
 Baud:    115200
 PID:     12345
+Clients: 1
+Uptime:  2h 15m
 Status:  running
 Socket:  /home/user/.serial-mux/sock/die0.sock
 SSH:     root@192.168.1.100
@@ -253,14 +255,8 @@ Non-interactive mode verifies that the serial device echoed the command back cor
 
 ## Identity Tagging
 
-Every input sent through the serial port is logged with a timestamp:
+All data (input and device output) is logged with timestamps. There is no source distinction — both input echo and device responses are recorded in the same format:
 
-
-
-
-Device output (responses from the serial device) is logged without modification.
-
-Example session as seen in the log:
 ```
 [2026-04-16 16:30:01] echo hello
 [2026-04-16 16:30:01] hello
@@ -287,7 +283,7 @@ scrollback_lines: 5000
 # SSH ConnectTimeout passed to ssh (seconds)
 ssh_connect_timeout: 3
 
-# How long to wait for SSH to establish before declaring failure (seconds)
+# How long to wait for the SSH process — if still alive after this, connection is assumed OK (seconds)
 ssh_probe_timeout: 5
 ```
 
@@ -323,7 +319,9 @@ ssh_probe_timeout: 5
   "baud": 115200,
   "pid": 12345,
   "socket": "/home/user/.serial-mux/sock/die0.sock",
-  "ssh": "root@192.168.1.100"
+  "ssh": "root@192.168.1.100",
+  "start_time": 1713267600.0,
+  "clients_count": 1
 }
 ```
 

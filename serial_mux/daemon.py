@@ -333,6 +333,12 @@ class SerialDaemon:
                     "message": f"Invalid baud rate: {new_baud}",
                 })
                 return
+            if not self.ser or not self.ser.is_open:
+                await async_write_msg(writer, {
+                    "type": "error",
+                    "message": "No serial device bound — cannot change baud rate",
+                })
+                return
             old_baud = self.baud
             try:
                 self.ser.baudrate = new_baud
