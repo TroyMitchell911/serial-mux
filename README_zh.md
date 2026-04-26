@@ -9,7 +9,7 @@
 - 一个串口，多个客户端同时访问
 - daemon 后台驻留，独占串口，通过 Unix socket 扇出数据
 - **可选 SSH 绑定** — SSH 优先，串口作为后备
-- 交互式客户端 `smtty` / `smtty-agent`
+- 交互式客户端 `smtty`
 - 非交互模式支持发送命令、等待匹配、echo 校验与自动重试
 - alias 机制解耦设备路径，拔插不影响使用
 - 按日期分割的持久化日志，自动清理过期文件
@@ -24,7 +24,7 @@
 curl -fsSL https://raw.githubusercontent.com/TroyMitchell911/serial-mux/main/install.sh | sudo bash
 ```
 
-脚本会将仓库 clone 到 `/usr/local/lib/serial-mux`，安装依赖，并在 `/usr/local/bin` 创建 `serial-mux`、`smtty`、`smtty-agent` 三个命令。同时会检测当前用户是否在串口设备组中。
+脚本会将仓库 clone 到 `/usr/local/lib/serial-mux`，安装依赖，并在 `/usr/local/bin` 创建 `serial-mux` 和 `smtty` 两个命令。同时会检测当前用户是否在串口设备组中。
 
 ### 手动安装
 
@@ -32,12 +32,6 @@ curl -fsSL https://raw.githubusercontent.com/TroyMitchell911/serial-mux/main/ins
 git clone https://github.com/TroyMitchell911/serial-mux.git
 cd serial-mux
 pip install -e .
-```
-
-安装后创建 `smtty-agent` symlink：
-
-```bash
-ln -sf $(which smtty) $(dirname $(which smtty))/smtty-agent
 ```
 
 ### 串口权限
@@ -96,12 +90,6 @@ smtty die0 --timestamps
 
 默认不显示时间戳。
 
-连接串口（以 Agent 身份）：
-
-```bash
-smtty-agent die0
-```
-
 ### 3. 断开连接
 
 交互模式下按 `Ctrl+]` detach，daemon 不受影响，其他客户端继续工作。
@@ -144,17 +132,14 @@ die1         /dev/ttyUSB1         115200     12346    0        45s          runn
 |------|------|
 | `smtty <alias>` | 交互式客户端 |
 | `smtty <alias> --timestamps` | 交互模式，显示时间戳 |
-| `smtty-agent <alias>` | 交互式客户端 |
-| `smtty-agent <alias> --send 'cmd' --wait 'pattern' --timeout 5` | 非交互模式 |
-
-`smtty` 和 `smtty-agent` 是同一个可执行文件的 symlink。
+| `smtty <alias> --send 'cmd' --wait 'pattern' --timeout 5` | 非交互模式 |
 
 ## 非交互模式
 
 专为自动化和 Agent 场景设计：
 
 ```bash
-smtty-agent die0 --send "ls" --wait "root@" --timeout 5
+smtty die0 --send "ls" --wait "root@" --timeout 5
 ```
 
 执行流程：

@@ -18,8 +18,7 @@ serial-mux daemon (后台进程，每个 alias 一个)
     +---> Unix socket (~/.serial-mux/sock/<alias>.sock)
               |
               +---> smtty <alias>                          交互式客户端
-              +---> smtty-agent <alias>                    交互式客户端
-              +---> smtty-agent <alias> --send/--wait      非交互式
+              +---> smtty <alias> --send/--wait            非交互式
 ```
 
 device 和 SSH 至少绑定一个。可以启动时同时绑定，也可以运行时动态 bind/unbind。
@@ -63,11 +62,9 @@ die1         /dev/ttyUSB1         115200     12346    0        45s          runn
 
 ```
 smtty <alias>                                          # 交互式模式
-smtty-agent <alias>                                   # 交互式模式
-smtty-agent <alias> --send "ls" --wait "root@" --timeout 5   # 非交互式
+smtty <alias> --send "ls" --wait "root@" --timeout 5         # 非交互式
 ```
 
-- `smtty` 和 `smtty-agent` 是同一个可执行文件的 symlink
 - alias 优先查找，未匹配时当设备路径处理
 
 ### detach
@@ -148,10 +145,10 @@ attach banner 显示当前传输层：
 ## 非交互模式
 
 ```
-smtty-agent die0 --send "ls" --wait "root@" --timeout 5
+smtty die0 --send "ls" --wait "root@" --timeout 5
 ```
 
-`smtty` 和 `smtty-agent` 均可使用 `--send`/`--wait` 进入非交互模式。
+使用 `--send`/`--wait` 参数进入非交互模式。
 
 流程：
 

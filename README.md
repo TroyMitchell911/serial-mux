@@ -20,8 +20,7 @@ serial-mux daemon (one per device, background process)
     +---> Unix socket (~/.serial-mux/sock/<alias>.sock)
               |
               +---> smtty <alias>                          interactive
-              +---> smtty-agent <alias>                    interactive
-              +---> smtty-agent <alias> --send/--wait      non-interactive
+              +---> smtty <alias> --send/--wait            non-interactive
 ```
 
 Each serial port gets its own independent daemon process. Clients connect and disconnect freely without affecting the daemon or each other. The daemon double-forks to daemonize (no systemd dependency).
@@ -60,20 +59,6 @@ sudo usermod -aG dialout $USER
 git clone https://github.com/TroyMitchell911/serial-mux.git
 cd serial-mux
 pip install -e .
-```
-
-#### Create the smtty-agent symlink
-
-`smtty-agent` is the same binary as `smtty`, accessed via a symlink:
-
-```bash
-ln -sf $(which smtty) $(dirname $(which smtty))/smtty-agent
-```
-
-Verify both commands exist:
-```bash
-which smtty        # should resolve
-which smtty-agent  # should resolve to the symlink
 ```
 
 ## Usage
@@ -202,28 +187,20 @@ Output looks like:
 
 Timestamps are off by default.
 
-#### smtty-agent — agent interactive mode
-
-```bash
-smtty-agent die0
-```
-
-Identical to `smtty` but commonly used for agents or automation.
-
 #### Detaching
 
 Press `Ctrl+]` to detach from an interactive session. The daemon keeps running — you can reattach at any time.
 
-### Non-Interactive Mode (smtty-agent)
+### Non-Interactive Mode
 
 Send a command, optionally wait for a pattern in the output:
 
 ```bash
 # Send a command and wait for a shell prompt
-smtty-agent die0 --send 'ls -la' --wait 'root@' --timeout 5
+smtty die0 --send 'ls -la' --wait 'root@' --timeout 5
 
 # Send a command, collect output for 1 second, exit
-smtty-agent die0 --send 'uname -a'
+smtty die0 --send 'uname -a'
 ```
 
 Flags:
@@ -351,11 +328,11 @@ smtty die0
 # (type commands, see output, Ctrl+] to detach)
 
 # In another terminal, attach another client
-smtty-agent die0
+smtty die0
 # (both sessions see the same output in real time)
 
 # Send a command non-interactively from a script
-output=$(smtty-agent die0 --send 'cat /proc/uptime' --wait '# ' --timeout 5)
+output=$(smtty die0 --send 'cat /proc/uptime' --wait '# ' --timeout 5)
 echo "$output"
 
 # Check what's running
@@ -389,10 +366,10 @@ serial-mux start /dev/ttyUSB0 --alias die0 --foreground
 ```bash
 #!/bin/bash
 # Reboot a device and wait for it to come back
-smtty-agent die0 --send 'reboot' --timeout 1
+smtty die0 --send 'reboot' --timeout 1
 sleep 10
-smtty-agent die0 --send '' --wait 'login:' --timeout 60
-smtty-agent die0 --send 'root' --wait '# ' --timeout 5
+smtty die0 --send '' --wait 'login:' --timeout 60
+smtty die0 --send 'root' --wait '# ' --timeout 5
 echo "Device is back up"
 ```
 

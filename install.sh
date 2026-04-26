@@ -58,13 +58,9 @@ main()
 WRAPPER
 chmod +x "$BIN_DIR/smtty"
 
-# smtty-agent (symlink)
-ln -sf "$BIN_DIR/smtty" "$BIN_DIR/smtty-agent"
-
 info "Installed:"
 info "  serial-mux  -> $BIN_DIR/serial-mux"
 info "  smtty       -> $BIN_DIR/smtty"
-info "  smtty-agent -> $BIN_DIR/smtty-agent"
 
 # Detect serial group
 SERIAL_GROUP=""
