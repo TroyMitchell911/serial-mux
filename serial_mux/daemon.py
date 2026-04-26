@@ -53,7 +53,7 @@ def validate_ssh_target(target: str) -> tuple[bool, str]:
 
 
 class SerialDaemon:
-    def __init__(self, device: str, baud: int, alias: str, config: Config):
+    def __init__(self, device: Optional[str], baud: int, alias: str, config: Config):
         self.device = device
         self.baud = baud
         self.alias = alias
@@ -68,6 +68,7 @@ class SerialDaemon:
         self.ssh_target: Optional[str] = None
         self._ssh_process: Optional[asyncio.subprocess.Process] = None
         self._ssh_reader_task: Optional[asyncio.Task] = None
+        self._serial_task: Optional[asyncio.Task] = None
 
     def _info_path(self) -> Path:
         return self.config.run_dir / f"{self.alias}.json"
@@ -366,6 +367,26 @@ class SerialDaemon:
                 "message": "SSH unbound",
             })
 
+        elif msg_type == "serial_bind":
+            device = msg.get("device", "")
+            baud = msg.get("baud")
+            ok, message = await self.bind_serial(device, baud)
+            await async_write_msg(writer, {
+                "type": "serial_bind_ack",
+                "device": device,
+                "ok": ok,
+                "message": message,
+            })
+
+        elif msg_type == "serial_unbind":
+            await self.unbind_serial()
+            await async_write_msg(writer, {
+                "type": "serial_bind_ack",
+                "device": "",
+                "ok": True,
+                "message": "Serial unbound",
+            })
+
     async def run(self):
         """Main daemon entry point."""
         self.running = True
@@ -377,8 +398,10 @@ class SerialDaemon:
         # Load existing history into ring buffer
         self.log_lines = self._load_history()
 
-        # Open serial
-        self._open_serial()
+        # Open serial if device specified
+        if self.device:
+            self._open_serial()
+            self._serial_task = asyncio.create_task(self._serial_reader())
 
         # Remove stale socket
         sock_path = self._sock_path()
@@ -391,7 +414,7 @@ class SerialDaemon:
         # Make socket accessible
         os.chmod(str(sock_path), 0o660)
 
-        logger.info(f"Daemon started: {self.alias} -> {self.device} @ {self.baud}")
+        logger.info(f"Daemon started: {self.alias} -> {self.device or 'no serial'} @ {self.baud}")
         logger.info(f"Socket: {sock_path}")
 
         # Start SSH if configured
@@ -399,9 +422,6 @@ class SerialDaemon:
             ok, msg = await self.bind_ssh(self.ssh_target)
             if not ok:
                 logger.warning(f"Failed to start SSH: {msg}")
-
-        # Start serial reader
-        serial_task = asyncio.create_task(self._serial_reader())
 
         # Setup signal handlers
         loop = asyncio.get_event_loop()
@@ -414,12 +434,14 @@ class SerialDaemon:
             pass
         finally:
             self.running = False
-            serial_task.cancel()
+            if self._serial_task:
+                self._serial_task.cancel()
             await self._cleanup_ssh()
-            try:
-                await serial_task
-            except asyncio.CancelledError:
-                pass
+            if self._serial_task:
+                try:
+                    await self._serial_task
+                except asyncio.CancelledError:
+                    pass
             server.close()
             await server.wait_closed()
             if self.ser and self.ser.is_open:
@@ -484,6 +506,41 @@ class SerialDaemon:
         self._write_info()
         if had_ssh:
             await self._broadcast({"type": "transport_changed", "transport": "serial"})
+
+    async def bind_serial(self, device: str, baud: int = None) -> tuple[bool, str]:
+        """Bind a serial port to this daemon at runtime."""
+        if baud is None:
+            baud = self.baud
+        # Close existing serial if any
+        await self.unbind_serial()
+        try:
+            self.device = device
+            self.baud = baud
+            self._open_serial()
+            self._serial_task = asyncio.create_task(self._serial_reader())
+            self._write_info()
+            logger.info(f"Serial bound to {device} @ {baud}")
+            return True, f"Serial connected to {device} @ {baud}"
+        except serial.SerialException as e:
+            logger.error(f"Failed to open serial {device}: {e}")
+            self.device = None
+            return False, str(e)
+
+    async def unbind_serial(self):
+        """Close serial port and stop reader task."""
+        if self._serial_task:
+            self._serial_task.cancel()
+            try:
+                await self._serial_task
+            except asyncio.CancelledError:
+                pass
+            self._serial_task = None
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+            self.ser = None
+        self.device = None
+        self._write_info()
+        logger.info("Serial unbound")
 
     async def _cleanup_ssh(self):
         """Terminate SSH process and reader task."""
@@ -569,9 +626,13 @@ def daemonize():
     os.close(devnull)
 
 
-def start_daemon(device: str, baud: int, alias: str, foreground: bool = False, ssh_target: str = None):
+def start_daemon(device: Optional[str], baud: int, alias: str, foreground: bool = False, ssh_target: str = None):
     """Start the daemon process."""
     config = Config.load()
+
+    if not device and not ssh_target:
+        print("Error: At least one of device or --ssh must be specified")
+        sys.exit(1)
 
     if not foreground:
         # Check if already running
@@ -587,12 +648,13 @@ def start_daemon(device: str, baud: int, alias: str, foreground: bool = False, s
                 pid_path.unlink(missing_ok=True)
 
         # Validate serial port access BEFORE daemonizing so errors are visible
-        try:
-            test_ser = serial.Serial(port=device, baudrate=baud, timeout=0.05)
-            test_ser.close()
-        except serial.SerialException as e:
-            print(f"Error: Cannot open {device}: {e}")
-            sys.exit(1)
+        if device:
+            try:
+                test_ser = serial.Serial(port=device, baudrate=baud, timeout=0.05)
+                test_ser.close()
+            except serial.SerialException as e:
+                print(f"Error: Cannot open {device}: {e}")
+                sys.exit(1)
 
         # Validate SSH target BEFORE daemonizing so errors are visible
         if ssh_target:

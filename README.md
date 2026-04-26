@@ -2,7 +2,7 @@
 
 [English](README.md) | [中文](README_zh.md)
 
-A serial port multiplexer that lets multiple clients share a single serial port simultaneously. A per-port daemon owns the serial device and fans data out to all connected clients over Unix domain sockets, with persistent logging.
+A serial port multiplexer that lets multiple clients share a single serial port simultaneously. A per-port daemon owns the serial device and fans data out to all connected clients over Unix domain sockets, with persistent logging. Optionally binds SSH for reliable remote access with automatic serial fallback.
 
 Think `tio` or `minicom`, but multiplexed — two people (or a person and an AI agent) can interact with the same serial console at the same time, and everyone sees everything.
 
@@ -83,20 +83,23 @@ which smtty-agent  # should resolve to the symlink
 #### Start a daemon
 
 ```bash
+# Start with serial port
 serial-mux start /dev/ttyUSB0 --baud 115200 --alias die0
-```
 
-- `--baud` / `-b` — baud rate (default: `115200`, configurable)
-- `--alias` / `-a` — friendly name (default: device basename, e.g. `ttyUSB0`)
-- `--foreground` / `-f` — don't daemonize, run in foreground (useful for debugging)
-- `--ssh` — optional SSH target to bind at start (e.g. `user@192.168.1.1` or an `~/.ssh/config` hostname)
+# Start with SSH only (no serial port)
+serial-mux start --ssh root@192.168.1.100 --alias die0
 
-Start with SSH bound:
-
-```bash
+# Start with both serial and SSH
 serial-mux start /dev/ttyUSB0 --alias die0 --ssh root@192.168.1.100
 serial-mux start /dev/ttyUSB0 --alias die0 --ssh k3_die0   # uses ~/.ssh/config
 ```
+
+- `--baud` / `-b` — baud rate (default: `115200`, configurable)
+- `--alias` / `-a` — friendly name (default: device basename; **required** when starting without a device)
+- `--foreground` / `-f` — don't daemonize, run in foreground (useful for debugging)
+- `--ssh` — optional SSH target to bind at start (e.g. `user@192.168.1.1` or an `~/.ssh/config` hostname)
+
+At least one of `DEVICE` or `--ssh` must be specified.
 
 #### Bind/unbind SSH at runtime
 
@@ -107,6 +110,16 @@ serial-mux ssh-bind die0 k3_die0   # hostname from ~/.ssh/config
 
 # Unbind SSH (clients fall back to serial)
 serial-mux ssh-unbind die0
+```
+
+#### Bind/unbind serial at runtime
+
+```bash
+# Bind a serial port to a running daemon (e.g., started with SSH only)
+serial-mux serial-bind die0 /dev/ttyUSB0 --baud 115200
+
+# Unbind serial port
+serial-mux serial-unbind die0
 ```
 
 When SSH is bound, clients prefer SSH for I/O. If the SSH connection dies, the daemon falls back to serial automatically. Bare hostnames (without `@`) are validated against `~/.ssh/config` before connecting.

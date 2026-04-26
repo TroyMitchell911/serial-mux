@@ -55,10 +55,17 @@ sudo usermod -aG uucp $USER
 ### 1. 启动 daemon
 
 ```bash
+# 启动串口 daemon
 serial-mux start /dev/ttyUSB0 --baud 115200 --alias die0
+
+# 仅启动 SSH（无串口）
+serial-mux start --ssh root@192.168.1.100 --alias die0
+
+# 同时绑定串口和 SSH
+serial-mux start /dev/ttyUSB0 --alias die0 --ssh root@192.168.1.100
 ```
 
-daemon 会 double-fork 到后台驻留，独占串口设备。
+daemon 会 double-fork 到后台驻留。`DEVICE` 和 `--ssh` 至少指定一个；无 device 时 `--alias` 必填。
 
 启动时绑定 SSH：
 
@@ -119,6 +126,8 @@ serial-mux stop die0
 | `serial-mux set-baud <alias> <baud>` | 动态修改运行中 daemon 的波特率 |
 | `serial-mux ssh-bind <alias> <target>` | 为运行中的 daemon 绑定 SSH（user@host 或 ssh config hostname） |
 | `serial-mux ssh-unbind <alias>` | 解除 SSH 绑定，回退到串口 |
+| `serial-mux serial-bind <alias> <device> [--baud]` | 为运行中的 daemon 绑定串口 |
+| `serial-mux serial-unbind <alias>` | 解除串口绑定 |
 
 `serial-mux list` 输出示例：
 

@@ -63,16 +63,25 @@ def cmd_start(args):
     """Start a daemon for a serial port."""
     config = Config.load()
 
-    device = args.device
+    device = getattr(args, 'device', None)
     baud = args.baud or config.default_baud
     alias = args.alias
+    ssh_target = getattr(args, 'ssh', None)
+
+    if not device and not ssh_target:
+        print("Error: At least one of DEVICE or --ssh must be specified")
+        sys.exit(1)
 
     if not alias:
-        # Derive alias from device name
-        alias = Path(device).name  # e.g., ttyUSB0
+        if device:
+            # Derive alias from device name
+            alias = Path(device).name  # e.g., ttyUSB0
+        else:
+            print("Error: --alias is required when starting without a serial device")
+            sys.exit(1)
 
     # Check device exists
-    if not Path(device).exists():
+    if device and not Path(device).exists():
         print(f"Error: Device {device} not found")
         sys.exit(1)
 
@@ -152,7 +161,7 @@ def cmd_list(args):
     print("-" * 101)
     for info in infos:
         alias = info.get("alias", "?")
-        device = info.get("device", "?")
+        device = info.get("device") or "-"
         baud = info.get("baud", "?")
         pid = info.get("pid", "?")
         status = "running" if info["_running"] else "dead"
@@ -176,7 +185,7 @@ def cmd_status(args):
     running = is_running(pid)
 
     print(f"Alias:   {alias}")
-    print(f"Device:  {info.get('device', '?')}")
+    print(f"Device:  {info.get('device') or 'none'}")
     print(f"Baud:    {info.get('baud', '?')}")
     print(f"PID:     {pid}")
     print(f"Status:  {'running' if running else 'dead'}")
@@ -313,15 +322,41 @@ def cmd_ssh_unbind(args):
         sys.exit(1)
 
 
+def cmd_serial_bind(args):
+    """Bind a serial port to a running daemon."""
+    msg = {"type": "serial_bind", "device": args.device}
+    if args.baud:
+        msg["baud"] = args.baud
+    resp = _send_daemon_msg(args.alias, msg)
+    if resp and resp.get("ok"):
+        print(resp.get("message", "Serial bound"))
+    elif resp and resp.get("type") == "serial_bind_ack":
+        print(f"Error: {resp.get('message', 'Serial bind failed')}")
+        sys.exit(1)
+    else:
+        print(f"Error: Unexpected response: {resp}")
+        sys.exit(1)
+
+
+def cmd_serial_unbind(args):
+    """Unbind serial port from a running daemon."""
+    resp = _send_daemon_msg(args.alias, {"type": "serial_unbind"})
+    if resp and resp.get("ok"):
+        print(resp.get("message", "Serial unbound"))
+    else:
+        print(f"Error: Unexpected response: {resp}")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="serial-mux", description="Serial port multiplexer")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # start
     p_start = sub.add_parser("start", help="Start a daemon for a serial port")
-    p_start.add_argument("device", help="Serial device path (e.g., /dev/ttyUSB0)")
+    p_start.add_argument("device", nargs="?", default=None, help="Serial device path (e.g., /dev/ttyUSB0). Optional if --ssh is given.")
     p_start.add_argument("--baud", "-b", type=int, help="Baud rate (default from config)")
-    p_start.add_argument("--alias", "-a", help="Alias name (default: device basename)")
+    p_start.add_argument("--alias", "-a", help="Alias name (default: device basename, required if no device)")
     p_start.add_argument("--foreground", "-f", action="store_true", help="Run in foreground")
     p_start.add_argument("--ssh", default=None, help="SSH target (user@host or ssh-config hostname)")
     p_start.set_defaults(func=cmd_start)
@@ -356,6 +391,18 @@ def main():
     p_ssh_unbind = sub.add_parser("ssh-unbind", help="Unbind SSH from a running daemon")
     p_ssh_unbind.add_argument("alias", help="Alias or device path")
     p_ssh_unbind.set_defaults(func=cmd_ssh_unbind)
+
+    # serial-bind
+    p_serial_bind = sub.add_parser("serial-bind", help="Bind a serial port to a running daemon")
+    p_serial_bind.add_argument("alias", help="Alias")
+    p_serial_bind.add_argument("device", help="Serial device path (e.g., /dev/ttyUSB0)")
+    p_serial_bind.add_argument("--baud", "-b", type=int, default=None, help="Baud rate (default: daemon's current)")
+    p_serial_bind.set_defaults(func=cmd_serial_bind)
+
+    # serial-unbind
+    p_serial_unbind = sub.add_parser("serial-unbind", help="Unbind serial port from a running daemon")
+    p_serial_unbind.add_argument("alias", help="Alias")
+    p_serial_unbind.set_defaults(func=cmd_serial_unbind)
 
     args = parser.parse_args()
     args.func(args)
