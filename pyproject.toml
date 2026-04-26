@@ -16,5 +16,11 @@ dependencies = [
 serial-mux = "serial_mux.cli:main"
 smtty = "serial_mux.client:main"
 
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-timeout>=2.0",
+]
+
 [tool.setuptools.packages.find]
 include = ["serial_mux*"]
