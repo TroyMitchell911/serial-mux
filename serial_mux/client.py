@@ -155,7 +155,13 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
 
             if sock in readable:
                 try:
+                    # Switch to blocking with timeout for reliable message framing.
+                    # Non-blocking reads can lose partial header bytes on EAGAIN,
+                    # corrupting the stream and causing hangs.
+                    sock.setblocking(True)
+                    sock.settimeout(2.0)
                     msg = sync_read_msg(sock)
+                    sock.setblocking(False)
                     if msg is None:
                         print("\r\n--- daemon disconnected ---\r\n", end="", flush=True)
                         break
@@ -177,13 +183,14 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
                                 if char_bytes == b"\n":
                                     last_output_was_newline = True
 
-                except BlockingIOError:
-                    pass
+                except (TimeoutError, socket.timeout):
+                    # Timeout reading a complete message — switch back to non-blocking
+                    sock.setblocking(False)
                 except (ConnectionResetError, BrokenPipeError):
                     print("\r\n--- connection lost ---\r\n", end="", flush=True)
                     break
                 except Exception:
-                    pass
+                    sock.setblocking(False)
 
     finally:
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
