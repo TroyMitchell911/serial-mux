@@ -261,8 +261,12 @@ def cmd_set_baud(args):
         sock.close()
 
 
-def _send_daemon_msg(alias: str, msg: dict) -> dict:
-    """Connect to daemon, handshake, send a message, return response."""
+def _send_daemon_msg(alias: str, msg: dict, expect_type: str = None) -> dict:
+    """Connect to daemon, handshake, send a message, return response.
+
+    If expect_type is set, skip intermediate broadcast messages until we get
+    a message of that type (or timeout).
+    """
     config = Config.load()
     info = resolve_alias(config, alias)
     if not info:
@@ -279,7 +283,7 @@ def _send_daemon_msg(alias: str, msg: dict) -> dict:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.connect(sock_path)
-        sock.settimeout(5.0)
+        sock.settimeout(15.0)
         sync_write_msg(sock, {"type": "hello"})
         resp = sync_read_msg(sock)
         if not resp or resp.get("type") != "hello_ack":
@@ -287,6 +291,15 @@ def _send_daemon_msg(alias: str, msg: dict) -> dict:
             sys.exit(1)
         sync_read_msg(sock)  # drain history
         sync_write_msg(sock, msg)
+        if expect_type:
+            # Skip broadcast messages until we get the expected response type
+            for _ in range(10):
+                resp = sync_read_msg(sock)
+                if not resp:
+                    return None
+                if resp.get("type") == expect_type:
+                    return resp
+            return resp  # give up, return last message
         resp = sync_read_msg(sock)
         return resp
     except socket.timeout:
@@ -301,7 +314,8 @@ def _send_daemon_msg(alias: str, msg: dict) -> dict:
 
 def cmd_ssh_bind(args):
     """Bind SSH to a running daemon."""
-    resp = _send_daemon_msg(args.alias, {"type": "ssh_bind", "target": args.ssh_target})
+    resp = _send_daemon_msg(args.alias, {"type": "ssh_bind", "target": args.ssh_target},
+                            expect_type="ssh_bind_ack")
     if resp and resp.get("ok"):
         print(resp.get("message", "SSH bound"))
     elif resp and resp.get("type") == "ssh_bind_ack":
