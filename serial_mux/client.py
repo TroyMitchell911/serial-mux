@@ -5,7 +5,9 @@ import json
 import os
 import select
 import socket
+import subprocess
 import sys
+import time
 import termios
 import tty
 from collections import deque
@@ -35,20 +37,118 @@ def resolve_socket(config: Config, alias: str) -> str:
     return ""
 
 
+def _is_daemon_dead(config: Config, alias: str) -> bool:
+    """Check if daemon for alias has a metadata file but process is dead."""
+    info_path = config.run_dir / f"{alias}.json"
+    if not info_path.exists():
+        return False
+    try:
+        info = json.loads(info_path.read_text())
+        pid = info.get("pid", 0)
+        os.kill(pid, 0)
+        return False  # still alive
+    except ProcessLookupError:
+        return True
+    except (PermissionError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _auto_resume_daemon(config: Config, alias: str) -> bool:
+    """Attempt to restart a dead daemon from its saved metadata. Returns True on success."""
+    info_path = config.run_dir / f"{alias}.json"
+    if not info_path.exists():
+        return False
+    try:
+        info = json.loads(info_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    device = info.get("device")
+    baud = info.get("baud", 115200)
+    ssh_target = info.get("ssh")
+
+    if not device and not ssh_target:
+        return False
+
+    # Clean up stale files before restarting
+    for suffix in [".json", ".pid"]:
+        p = config.run_dir / f"{alias}{suffix}"
+        p.unlink(missing_ok=True)
+    sock_file = config.sock_dir / f"{alias}.sock"
+    sock_file.unlink(missing_ok=True)
+
+    # Build the serial-mux start command
+    cmd = [sys.executable, "-m", "serial_mux.cli", "start", "--alias", alias]
+    if device:
+        cmd.append(device)
+        cmd.extend(["--baud", str(baud)])
+    if ssh_target:
+        cmd.extend(["--ssh", ssh_target])
+
+    print(f"Resuming dead daemon '{alias}'...", file=sys.stderr, flush=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        print(f"Error: Timed out resuming daemon '{alias}'", file=sys.stderr)
+        return False
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        print(f"Error: Failed to resume daemon '{alias}': {stderr}", file=sys.stderr)
+        return False
+
+    # Wait for socket to appear
+    sock_path = str(config.sock_dir / f"{alias}.sock")
+    for _ in range(30):
+        if Path(sock_path).exists():
+            return True
+        time.sleep(0.1)
+
+    print(f"Error: Daemon resumed but socket not ready", file=sys.stderr)
+    return False
+
+
 def connect(config: Config, alias: str) -> socket.socket:
-    """Connect to daemon and perform handshake."""
+    """Connect to daemon and perform handshake. Auto-resumes dead daemons."""
     sock_path = resolve_socket(config, alias)
+
+    need_resume = False
     if not sock_path:
-        print(f"Error: No daemon found for '{alias}'", file=sys.stderr)
-        print(f"Start one with: serial-mux start <device> --alias {alias}", file=sys.stderr)
-        sys.exit(1)
+        # No metadata at all — check if there's a dead daemon to resume
+        if _is_daemon_dead(config, alias):
+            need_resume = True
+        else:
+            print(f"Error: No daemon found for '{alias}'", file=sys.stderr)
+            print(f"Start one with: serial-mux start <device> --alias {alias}", file=sys.stderr)
+            sys.exit(1)
+    elif not Path(sock_path).exists():
+        need_resume = _is_daemon_dead(config, alias)
+        if not need_resume:
+            print(f"Error: Socket {sock_path} not found. Daemon may have crashed.", file=sys.stderr)
+            sys.exit(1)
 
-    if not Path(sock_path).exists():
-        print(f"Error: Socket {sock_path} not found. Daemon may have crashed.", file=sys.stderr)
-        sys.exit(1)
+    if not need_resume and sock_path:
+        # Try connecting — may get ConnectionRefused if socket file is stale
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(sock_path)
+        except (ConnectionRefusedError, OSError):
+            sock.close()
+            need_resume = _is_daemon_dead(config, alias)
+            if not need_resume:
+                print(f"Error: Connection refused to '{alias}'. Daemon may have crashed.", file=sys.stderr)
+                sys.exit(1)
 
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(sock_path)
+    if need_resume:
+        if not _auto_resume_daemon(config, alias):
+            sys.exit(1)
+        # Re-resolve socket after restart
+        sock_path = resolve_socket(config, alias)
+        if not sock_path:
+            print(f"Error: Daemon resumed but socket path not found", file=sys.stderr)
+            sys.exit(1)
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(sock_path)
 
     # Send hello
     sync_write_msg(sock, {"type": "hello"})
