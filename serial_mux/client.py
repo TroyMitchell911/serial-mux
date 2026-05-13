@@ -266,8 +266,14 @@ def noninteractive_mode(config: Config, alias: str,
 
     # Now wait for pattern if specified, continuing to accumulate output
     if wait_pattern:
+        # Compile regex pattern (fall back to literal match on invalid regex)
+        try:
+            wait_re = re.compile(wait_pattern)
+        except re.error:
+            wait_re = re.compile(re.escape(wait_pattern))
+
         # Check if pattern already in what we received during echo phase
-        if wait_pattern in all_output:
+        if wait_re.search(all_output):
             _print_output(all_output, send_cmd)
             sock.close()
             return
@@ -280,7 +286,7 @@ def noninteractive_mode(config: Config, alias: str,
                     msg = sync_read_msg(sock)
                     if msg and msg["type"] == "output":
                         all_output += unb64(msg["data"]).decode("utf-8", errors="replace")
-                        if wait_pattern in all_output:
+                        if wait_re.search(all_output):
                             _print_output(all_output, send_cmd)
                             sock.close()
                             return
