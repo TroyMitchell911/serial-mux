@@ -206,8 +206,17 @@ class SerialDaemon:
                         line_buf.append(byte)
 
             except serial.SerialException as e:
-                logger.error(f"Serial error: {e}")
-                self.running = False
+                logger.error(f"Serial error: {e}, unbinding serial")
+                # Don't kill the daemon — just unbind the dead serial port
+                if self.ser:
+                    try:
+                        self.ser.close()
+                    except Exception:
+                        pass
+                    self.ser = None
+                self.device = None
+                self._write_info()
+                await self._broadcast({"type": "serial_lost", "reason": str(e)})
                 break
             except asyncio.CancelledError:
                 break
@@ -317,10 +326,20 @@ class SerialDaemon:
                     if self.ser and self.ser.is_open:
                         self.ser.write(data)
                         self.ser.flush()
+                    else:
+                        await async_write_msg(writer, {
+                            "type": "error",
+                            "message": "No transport available (SSH failed, no serial bound)",
+                        })
             else:
                 if self.ser and self.ser.is_open:
                     self.ser.write(data)
                     self.ser.flush()
+                else:
+                    await async_write_msg(writer, {
+                        "type": "error",
+                        "message": "No transport available (no SSH or serial bound)",
+                    })
 
             # Log the command (detect newline to log as a line)
             # DELETED: Redundant because serial echo is already captured by reader
@@ -589,9 +608,11 @@ class SerialDaemon:
         except Exception as e:
             logger.error(f"SSH reader error: {e}")
 
-        # SSH died — notify clients
+        # SSH died — clear state, update info, notify clients
         logger.warning("SSH process ended, falling back to serial")
         self._ssh_process = None
+        self.ssh_target = None
+        self._write_info()
         await self._broadcast({"type": "transport_changed", "transport": "serial"})
 
     def _shutdown(self):
