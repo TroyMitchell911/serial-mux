@@ -153,9 +153,9 @@ Alias:   die0
 Device:  /dev/ttyUSB0
 Baud:    115200
 PID:     12345
+Status:  running
 Clients: 1
 Uptime:  2h 15m
-Status:  running
 Socket:  /home/user/.serial-mux/sock/die0.sock
 SSH:     root@192.168.1.100
 Logs:    3 files, 42.5 KB
