@@ -90,6 +90,20 @@ smtty die0 --timestamps
 
 默认不显示时间戳。
 
+#### 查看最近日志
+
+不连接 daemon，直接从日志文件打印最后 N 行：
+
+```bash
+# 默认最后 50 行
+smtty die0 --tail
+
+# 最后 200 行
+smtty die0 --tail 200
+```
+
+daemon 不需要在运行中，直接读取日志文件。
+
 ### 3. 断开连接
 
 交互模式下按 `Ctrl+]` detach，daemon 不受影响，其他客户端继续工作。
@@ -132,6 +146,7 @@ die1         /dev/ttyUSB1         115200     12346    0        45s          runn
 |------|------|
 | `smtty <alias>` | 交互式客户端 |
 | `smtty <alias> --timestamps` | 交互模式，显示时间戳 |
+| `smtty <alias> --tail [N]` | 打印最后 N 行日志并退出（默认 50） |
 | `smtty <alias> --send 'cmd' --wait 'pattern' --timeout 5` | 非交互模式 |
 
 ## 非交互模式

@@ -177,6 +177,20 @@ Use `--timestamps` / `-T` to show timestamps on all lines — history, input (on
 smtty die0 --timestamps
 ```
 
+#### Tail log output
+
+Print the last N lines from the daemon's log without attaching:
+
+```bash
+# Last 50 lines (default)
+smtty die0 --tail
+
+# Last 200 lines
+smtty die0 --tail 200
+```
+
+This reads directly from the log files — the daemon doesn't need to be running.
+
 Output looks like:
 ```
 [16:30:01] Linux login: root

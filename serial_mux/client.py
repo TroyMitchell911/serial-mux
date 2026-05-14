@@ -432,6 +432,36 @@ def _print_output(output: str, cmd: str):
             print(line, end="" if i == len(lines) - 1 else "\n")
 
 
+def tail_mode(config: Config, alias: str, lines: int = 50):
+    """Print the last N lines from the daemon's log files and exit."""
+    log_dir = config.logs_dir / alias
+    if not log_dir.exists():
+        print(f"Error: No logs found for '{alias}'", file=sys.stderr)
+        sys.exit(1)
+
+    log_files = sorted(log_dir.glob("*.log"))
+    if not log_files:
+        print(f"Error: No log files in {log_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    # Collect lines from the most recent log files (newest last)
+    collected = []
+    for log_file in reversed(log_files):
+        try:
+            with open(log_file, "r", errors="replace") as f:
+                file_lines = f.readlines()
+            collected = file_lines + collected
+            if len(collected) >= lines:
+                break
+        except OSError:
+            continue
+
+    # Take the last N lines
+    tail = collected[-lines:]
+    for line in tail:
+        sys.stdout.write(line if line.endswith("\n") else line + "\n")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="smtty",
@@ -444,11 +474,16 @@ def main():
                         help="Timeout in seconds for --wait (default: 10)")
     parser.add_argument("--timestamps", "-T", action="store_true", default=False,
                         help="Show timestamps on history, input and output lines")
+    parser.add_argument("--tail", type=int, nargs="?", const=50, default=None,
+                        metavar="N",
+                        help="Print last N lines from log and exit (default: 50)")
 
     args = parser.parse_args()
     config = Config.load()
 
-    if args.send:
+    if args.tail is not None:
+        tail_mode(config, args.alias, lines=args.tail)
+    elif args.send:
         noninteractive_mode(config, args.alias,
                            send_cmd=args.send,
                            wait_pattern=args.wait,
