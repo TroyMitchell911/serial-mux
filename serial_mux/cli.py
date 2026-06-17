@@ -140,9 +140,24 @@ def cmd_stop(args):
     print(f"Daemon '{alias}' killed")
 
 
+def _prune_stale(config: Config):
+    """Remove metadata for daemons whose PID is no longer running."""
+    for f in list(config.run_dir.glob("*.json")):
+        try:
+            info = json.loads(f.read_text())
+            if not is_running(info.get("pid", 0)):
+                alias = info.get("alias", f.stem)
+                for suffix in [".json", ".pid"]:
+                    (config.run_dir / f"{alias}{suffix}").unlink(missing_ok=True)
+                (config.sock_dir / f"{alias}.sock").unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def cmd_list(args):
     """List all running daemons."""
     config = Config.load()
+    _prune_stale(config)
     infos = []
     for f in sorted(config.run_dir.glob("*.json")):
         try:

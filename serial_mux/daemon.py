@@ -22,6 +22,7 @@ from .protocol import (
     unb64,
     HEADER_FMT,
     HEADER_SIZE,
+    MAX_MSG_SIZE,
 )
 
 logger = logging.getLogger("serial-mux-daemon")
@@ -286,6 +287,11 @@ class SerialDaemon:
             if self.log_lines:
                 # Merge: use ring buffer as it's more current
                 all_lines = self.log_lines[-self.config.scrollback_lines:]
+            # Trim oldest lines until the JSON payload fits in one message
+            while all_lines:
+                if len(json.dumps({"type": "history", "lines": all_lines}).encode()) <= MAX_MSG_SIZE:
+                    break
+                all_lines = all_lines[len(all_lines) // 4 + 1:]
             await async_write_msg(writer, {"type": "history", "lines": all_lines})
 
             # Main client loop
