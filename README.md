@@ -230,18 +230,18 @@ When the daemon has SSH bound, clients automatically use the SSH transport. The 
 --- serial-mux: attached to die0 [ssh] (Ctrl+] to detach) ---
 ```
 
-In non-interactive mode with SSH transport, **echo verification is skipped** — the network layer guarantees reliable delivery, so no retry is needed. If SSH drops mid-session, the daemon switches to serial automatically and notifies all clients.
+If SSH drops mid-session, the daemon switches to serial automatically and notifies all clients.
 
-#### Echo verification
+#### Command delivery
 
-Non-interactive mode verifies that the serial device echoed the command back correctly. If the echo doesn't match (e.g. due to line noise or buffer issues), it retries up to 5 times. If all retries fail, it exits with a non-zero status.
+Non-interactive mode sends each command exactly once on both serial and SSH transports, then immediately starts collecting output or waiting for the `--wait` pattern. It does not verify terminal echo or retry a command.
 
 #### Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0    | Success (command sent, pattern matched if `--wait` was used) |
-| 1    | Connection error or echo verification failed after 5 retries |
+| 1    | Connection error |
 | 2    | Timeout waiting for `--wait` pattern |
 
 ## Identity Tagging
