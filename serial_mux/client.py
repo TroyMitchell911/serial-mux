@@ -300,83 +300,34 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
 def noninteractive_mode(config: Config, alias: str,
                          send_cmd: str, wait_pattern: str = None,
                          timeout: float = 10.0):
-    """Non-interactive mode: send command, verify echo, wait for pattern."""
-    import time
-
-    sock, transport = connect(config, alias)
+    """Non-interactive mode: send a command once, then wait for output."""
+    sock, _transport = connect(config, alias)
 
     # Drain history
     msg = sync_read_msg(sock)  # history message
 
     sock.setblocking(False)
-
-    use_echo_verify = (transport != "ssh")
-
-    max_retries = 5 if use_echo_verify else 1
-    send_success = False
     all_output = ""  # Accumulate ALL output from the moment we send
 
-    for attempt in range(max_retries):
-        # Send command + CR
-        cmd_bytes = (send_cmd + "\r").encode("utf-8")
-        try:
-            sock.setblocking(True)
-            sync_write_msg(sock, {"type": "input", "data": b64(cmd_bytes)})
-            sock.setblocking(False)
-        except (BrokenPipeError, ConnectionResetError):
-            print(f"Error: Connection lost", file=sys.stderr)
-            sys.exit(1)
-
-        if not use_echo_verify:
-            # SSH transport: no echo verification needed
-            send_success = True
-            break
-
-        # Wait for echo and verify
-        all_output = ""
-        deadline = time.time() + 3.0  # 3s to see echo
-
-        while time.time() < deadline:
-            readable, _, _ = select.select([sock], [], [], 0.1)
-            if sock in readable:
-                try:
-                    msg = sync_read_msg(sock)
-                    if msg and msg["type"] == "output":
-                        all_output += unb64(msg["data"]).decode("utf-8", errors="replace")
-                        # Check if our command appeared in echo
-                        if send_cmd in all_output:
-                            send_success = True
-                            break
-                except BlockingIOError:
-                    pass
-                except Exception:
-                    pass
-
-        if send_success:
-            break
-        else:
-            if attempt < max_retries - 1:
-                print(f"Warning: Echo mismatch (attempt {attempt + 1}/{max_retries}), retrying...",
-                      file=sys.stderr)
-                time.sleep(0.5)
-
-    if not send_success:
-        print(f"Error: Failed to verify command echo after {max_retries} attempts", file=sys.stderr)
+    # Send command + CR exactly once.  Output handling below is independent of
+    # terminal echo, so devices with echo disabled do not trigger a resend.
+    cmd_bytes = (send_cmd + "\r").encode("utf-8")
+    try:
+        sock.setblocking(True)
+        sync_write_msg(sock, {"type": "input", "data": b64(cmd_bytes)})
+        sock.setblocking(False)
+    except (BrokenPipeError, ConnectionResetError):
+        print("Error: Connection lost", file=sys.stderr)
+        sock.close()
         sys.exit(1)
 
-    # Now wait for pattern if specified, continuing to accumulate output
+    # Now wait for pattern if specified and accumulate output.
     if wait_pattern:
         # Compile regex pattern (fall back to literal match on invalid regex)
         try:
             wait_re = re.compile(wait_pattern)
         except re.error:
             wait_re = re.compile(re.escape(wait_pattern))
-
-        # Check if pattern already in what we received during echo phase
-        if wait_re.search(all_output):
-            _print_output(all_output, send_cmd)
-            sock.close()
-            return
 
         deadline = time.time() + timeout
         while time.time() < deadline:
