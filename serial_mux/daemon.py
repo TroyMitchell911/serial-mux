@@ -24,6 +24,7 @@ from .protocol import (
     HEADER_SIZE,
     MAX_MSG_SIZE,
 )
+from .state import get_boot_id, inspect_usb_device, mark_info_saved, write_info
 
 logger = logging.getLogger("serial-mux-daemon")
 
@@ -70,6 +71,9 @@ class SerialDaemon:
         self._ssh_process: Optional[asyncio.subprocess.Process] = None
         self._ssh_reader_task: Optional[asyncio.Task] = None
         self._serial_task: Optional[asyncio.Task] = None
+        self.boot_id = get_boot_id()
+        self._usb_info = inspect_usb_device(device)
+        self._last_usb_check = 0.0
 
     def _info_path(self) -> Path:
         return self.config.run_dir / f"{self.alias}.json"
@@ -94,15 +98,27 @@ class SerialDaemon:
             "start_time": self.start_time,
             "clients_count": len(self.clients),
             "ssh": self.ssh_target,
+            "boot_id": self.boot_id,
         }
-        self._info_path().write_text(json.dumps(info, indent=2))
+        info.update(self._usb_info)
+        write_info(self._info_path(), info)
 
     def _write_pid(self):
         self._pid_path().write_text(str(os.getpid()))
 
-    def _cleanup_files(self):
-        """Remove PID, socket, and info files."""
-        for p in [self._pid_path(), self._sock_path(), self._info_path()]:
+    def _cleanup_files(self, remove_info: bool = False):
+        """Remove transient files, optionally deleting the saved mapping.
+
+        A daemon cannot distinguish a host shutdown from another SIGTERM, so
+        its alias record is retained for reboot recovery. ``serial-mux stop``
+        explicitly removes that record after the process has exited.
+        """
+        paths = [self._pid_path(), self._sock_path()]
+        if remove_info:
+            paths.append(self._info_path())
+        else:
+            mark_info_saved(self._info_path())
+        for p in paths:
             try:
                 p.unlink(missing_ok=True)
             except Exception:
@@ -206,7 +222,7 @@ class SerialDaemon:
                     else:
                         line_buf.append(byte)
 
-            except serial.SerialException as e:
+            except (serial.SerialException, OSError) as e:
                 logger.error(f"Serial error: {e}, unbinding serial")
                 # Don't kill the daemon — just unbind the dead serial port
                 if self.ser:
@@ -216,6 +232,7 @@ class SerialDaemon:
                         pass
                     self.ser = None
                 self.device = None
+                self._usb_info = {}
                 self._write_info()
                 await self._broadcast({"type": "serial_lost", "reason": str(e)})
                 break
@@ -227,12 +244,22 @@ class SerialDaemon:
 
     def _serial_read(self) -> bytes:
         """Blocking serial read (called in executor)."""
-        if self.ser and self.ser.is_open:
-            try:
-                data = self.ser.read(4096)
-                return data if data else b""
-            except Exception:
-                return b""
+        if self.ser and not self.ser.is_open:
+            raise serial.SerialException("Serial port closed unexpectedly")
+        if self.ser:
+            # Some USB-serial drivers return empty reads instead of raising an
+            # error after removal. Poll the sysfs enumeration token as a
+            # fallback so both unplug and a fast unplug/replug are noticed.
+            now = time.monotonic()
+            if self._usb_info and now - self._last_usb_check >= 0.25:
+                self._last_usb_check = now
+                current_usb = inspect_usb_device(self.device)
+                if current_usb != self._usb_info:
+                    raise serial.SerialException(
+                        "USB serial port was unplugged or re-enumerated"
+                    )
+            data = self.ser.read(4096)
+            return data if data else b""
         return b""
 
     async def _broadcast(self, msg: dict):
@@ -422,7 +449,6 @@ class SerialDaemon:
         """Main daemon entry point."""
         self.running = True
         self.config.ensure_dirs()
-        self._write_info()
         self._write_pid()
         self._purge_old_logs()
 
@@ -433,6 +459,9 @@ class SerialDaemon:
         if self.device:
             self._open_serial()
             self._serial_task = asyncio.create_task(self._serial_reader())
+
+        # Only publish a recoverable mapping after the serial port has opened.
+        self._write_info()
 
         # Remove stale socket
         sock_path = self._sock_path()
@@ -548,6 +577,8 @@ class SerialDaemon:
             self.device = device
             self.baud = baud
             self._open_serial()
+            self._usb_info = inspect_usb_device(device)
+            self._last_usb_check = 0.0
             self._serial_task = asyncio.create_task(self._serial_reader())
             self._write_info()
             logger.info(f"Serial bound to {device} @ {baud}")
@@ -555,6 +586,8 @@ class SerialDaemon:
         except serial.SerialException as e:
             logger.error(f"Failed to open serial {device}: {e}")
             self.device = None
+            self._usb_info = {}
+            self._write_info()
             return False, str(e)
 
     async def unbind_serial(self):
@@ -570,6 +603,7 @@ class SerialDaemon:
             self.ser.close()
             self.ser = None
         self.device = None
+        self._usb_info = {}
         self._write_info()
         logger.info("Serial unbound")
 
@@ -741,5 +775,7 @@ def start_daemon(device: Optional[str], baud: int, alias: str, foreground: bool 
         asyncio.run(daemon.run())
     except Exception as e:
         logger.error(f"Daemon fatal error: {e}")
+        # A pre-existing JSON may be the only copy of a reboot-recovery
+        # mapping, so fatal startup cleanup removes transient files only.
         daemon._cleanup_files()
         sys.exit(1)
