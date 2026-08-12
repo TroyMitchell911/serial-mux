@@ -80,11 +80,31 @@ serial-mux start /dev/ttyUSB0 --alias die0 --ssh k3_die0   # uses ~/.ssh/config
 ```
 
 - `--baud` / `-b` — baud rate (default: `115200`, configurable)
-- `--alias` / `-a` — friendly name (default: device basename; **required** when starting without a device)
+- `--alias` / `-a` — friendly name (reuses a saved physical-port mapping,
+  otherwise defaults to the device basename; required for a new SSH-only alias)
 - `--foreground` / `-f` — don't daemonize, run in foreground (useful for debugging)
 - `--ssh` — optional SSH target to bind at start (e.g. `user@192.168.1.1` or an `~/.ssh/config` hostname)
 
-At least one of `DEVICE` or `--ssh` must be specified.
+At least one of `DEVICE` or `--ssh` must be specified for a new alias. A saved
+alias can be restored with `serial-mux start --alias <name>`.
+
+`start` records the physical USB port and the current enumeration instance.
+After a host reboot, `run/<alias>.json` remains as saved state. The first
+`smtty <alias>` reconnect resolves the current `/dev/ttyUSBx` on that physical
+port and resumes the daemon. It can also be restored explicitly:
+
+```bash
+serial-mux start --alias die0
+```
+
+`usb_port` is the only persistent lookup key. Recovery scans `/sys/class/tty`
+for that physical port and derives a temporary `/dev/ttyUSBx` path only when
+opening the serial port. The previous TTY name is never matched or fed back
+into `start`; `device` is cleared from the saved record when the daemon exits.
+
+An unplug or re-enumeration during the same boot invalidates the old serial
+mapping. It is never silently assigned to a device plugged in later; use
+`serial-bind` on the surviving daemon or start a new mapping explicitly.
 
 #### Bind/unbind SSH at runtime
 
@@ -117,9 +137,12 @@ When SSH is bound, clients prefer SSH for I/O. If the SSH connection dies, the d
 serial-mux stop die0
 ```
 
-Sends SIGTERM for graceful shutdown. The daemon closes the serial port, disconnects all clients, and cleans up its socket and PID files. Falls back to SIGKILL after 3 seconds if needed.
+Sends SIGTERM for graceful shutdown. The daemon closes the serial port,
+disconnects all clients, and cleans up its socket and PID files. An explicit
+`stop` also deletes the saved alias mapping. Falls back to SIGKILL after 3
+seconds if needed.
 
-#### List running daemons
+#### List daemons and saved mappings
 
 ```bash
 serial-mux list
@@ -130,7 +153,7 @@ Output:
 ALIAS        DEVICE               BAUD       PID      CLIENTS  UPTIME       STATUS     SSH
 -----------------------------------------------------------------------------------------------------
 die0         /dev/ttyUSB0         115200     12345    1        2h 15m       running    root@192.168.1.100
-die1         /dev/ttyUSB1         115200     12346    0        2h 15m       running    -
+die1         /dev/ttyUSB1  115200  -  -  -  saved  -
 ```
 
 #### Change baud rate
@@ -157,6 +180,7 @@ Status:  running
 Clients: 1
 Uptime:  2h 15m
 Socket:  /home/user/.serial-mux/sock/die0.sock
+USB Port: pci0000:00/.../usb/usb-2/usb-2:1.0
 SSH:     root@192.168.1.100
 Logs:    3 files, 42.5 KB
 ```
@@ -283,7 +307,7 @@ ssh_probe_timeout: 5
 ```
 ~/.serial-mux/
 ├── run/
-│   ├── die0.json          # Alias metadata (device, baud, PID, socket path)
+│   ├── die0.json          # Persistent alias and USB identity metadata
 │   ├── die0.pid           # PID file
 │   ├── die1.json
 │   └── die1.pid
@@ -306,15 +330,22 @@ ssh_probe_timeout: 5
 ```json
 {
   "alias": "die0",
-  "device": "/dev/ttyUSB0",
+  "device": null,
   "baud": 115200,
-  "pid": 12345,
+  "pid": null,
   "socket": "/home/user/.serial-mux/sock/die0.sock",
+  "boot_id": "fafa4fd7-...",
+  "usb_port": "pci0000:00/.../usb/usb-2/usb-2:1.0",
+  "usb_instance": "1:4",
   "ssh": "root@192.168.1.100",
-  "start_time": 1713267600.0,
-  "clients_count": 1
+  "start_time": null,
+  "clients_count": 0
 }
 ```
+
+This example shows an inactive saved record. `usb_port` is its recovery key;
+`device` is populated only while a daemon is running, with the TTY node found
+by the current sysfs reverse lookup.
 
 ## Log Management
 
@@ -325,9 +356,14 @@ ssh_probe_timeout: 5
 
 ## Alias System
 
-Device paths like `/dev/ttyUSB0` are unstable — unplug and replug and it might become `ttyUSB1`. Aliases decouple clients from physical device paths. You always connect with `smtty die0` regardless of which `/dev/ttyUSBx` it happens to be on.
+Device paths like `/dev/ttyUSB0` can change across host reboots. An alias
+records the physical USB port, boot ID, and enumeration instance so the same
+port can be resolved as `/dev/ttyUSB1` after reboot. A USB unplug or
+re-enumeration in the same boot invalidates the old mapping instead of
+silently reusing the alias.
 
-If no `--alias` is given at start time, the device basename is used (e.g. `ttyUSB0`).
+If no `--alias` is given, a saved alias for the same physical USB port is
+reused. Otherwise, the device basename is used (for example `ttyUSB0`).
 
 ## Examples
 

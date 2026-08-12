@@ -11,7 +11,7 @@
 - **可选 SSH 绑定** — SSH 优先，串口作为后备
 - 交互式客户端 `smtty`
 - 非交互模式支持单次发送命令并等待输出匹配
-- alias 机制解耦设备路径，拔插不影响使用
+- alias 记录物理 USB 端口，系统重启后保留映射；USB 拔插会自动使映射失效
 - 按日期分割的持久化日志，自动清理过期文件
 - attach 时回放历史行，scrollback 由终端/tmux 管理
 - 输出直接到 stdout，复制粘贴正常工作
@@ -59,7 +59,23 @@ serial-mux start --ssh root@192.168.1.100 --alias die0
 serial-mux start /dev/ttyUSB0 --alias die0 --ssh root@192.168.1.100
 ```
 
-daemon 会 double-fork 到后台驻留。`DEVICE` 和 `--ssh` 至少指定一个；无 device 时 `--alias` 必填。
+daemon 会 double-fork 到后台驻留。新建 alias 时 `DEVICE` 和 `--ssh` 至少指定一个；
+已有保存记录时可以只用 `--alias` 恢复。
+
+`start` 会记录 USB 串口所在的物理端口和本次枚举实例。系统重启后，
+`run/<alias>.json` 不会作为 stale 状态删除；第一次执行 `smtty <alias>` 时会按物理端口
+找到当前 `/dev/ttyUSBx` 并恢复 daemon，也可以手动执行：
+
+```bash
+serial-mux start --alias die0
+```
+
+恢复过程以 `usb_port` 为唯一持久依据：扫描 `/sys/class/tty` 找到该物理端口当前
+对应的 tty，最后才生成用于打开串口的临时 `/dev/ttyUSBx` 路径。旧 tty 名不会参与
+匹配；daemon 退出后，JSON 中的 `device` 会被清空。
+
+同一次开机中若 USB 串口被拔出或重新枚举，旧映射会自动清除，不会把原 alias
+静默绑定到后来插入的设备。daemon 仍在时请用 `serial-bind`，否则显式新建映射。
 
 启动时绑定 SSH：
 
@@ -123,7 +139,7 @@ serial-mux stop die0
 | `serial-mux start <device> --baud <rate> --alias <name>` | 启动 daemon，独占串口 |
 | `serial-mux start <device> --baud <rate> --alias <name> --foreground` | 前台模式启动，用于调试 |
 | `serial-mux stop <alias>` | 停止指定 daemon |
-| `serial-mux list` | 列出所有运行中的串口 |
+| `serial-mux list` | 列出运行中的 daemon 和保存的映射 |
 | `serial-mux status <alias>` | 查看指定串口的详细状态 |
 | `serial-mux set-baud <alias> <baud>` | 动态修改运行中 daemon 的波特率（需已绑定串口） |
 | `serial-mux ssh-bind <alias> <target>` | 为运行中的 daemon 绑定 SSH（user@host 或 ssh config hostname） |
@@ -137,7 +153,7 @@ serial-mux stop die0
 ALIAS        DEVICE               BAUD       PID      CLIENTS  UPTIME       STATUS     SSH
 -----------------------------------------------------------------------------------------------------
 die0         /dev/ttyUSB0         115200     12345    1        2h 15m       running    root@192.168.1.100
-die1         /dev/ttyUSB1         115200     12346    0        45s          running    -
+die1         /dev/ttyUSB1  115200  -  -  -  saved  -
 ```
 
 ### 客户端
@@ -213,22 +229,30 @@ SSH target 支持两种格式：
 
 ## alias 机制
 
-设备路径不稳定（拔插后 `/dev/ttyUSB0` 可能变成 `/dev/ttyUSB1`），alias 将客户端与具体设备路径解耦。
+设备路径在系统重启后可能变化（例如 `/dev/ttyUSB0` 变成 `/dev/ttyUSB1`）。alias
+保存物理 USB 端口、boot ID 和 USB 枚举实例，因此重启后可以找回同一端口上的设备；
+同一次开机中的拔插则会使旧映射失效。
 
 alias 映射存储在 `~/.serial-mux/run/<alias>.json`：
 
 ```json
 {
   "alias": "die0",
-  "device": "/dev/ttyUSB0",
+  "device": null,
   "baud": 115200,
-  "pid": 12345,
+  "pid": null,
   "socket": "/home/user/.serial-mux/sock/die0.sock",
+  "boot_id": "fafa4fd7-...",
+  "usb_port": "pci0000:00/.../usb/usb-2/usb-2:1.0",
+  "usb_instance": "1:4",
   "ssh": "root@192.168.1.100",
-  "start_time": 1713267600.0,
-  "clients_count": 1
+  "start_time": null,
+  "clients_count": 0
 }
 ```
+
+上例是 daemon 未运行时的持久记录。`usb_port` 是恢复主键；`device` 只在 daemon
+运行期间表示本次反查得到的当前设备节点，不用于跨重启匹配。
 
 客户端使用 alias 连接时优先查找映射，未匹配时当设备路径处理。
 
@@ -271,7 +295,7 @@ daemon 启动时自动扫描 logs 目录，删除超过 `log_retention_days` 天
 ```
 ~/.serial-mux/
 ├── run/
-│   ├── die0.json          # alias 映射 + PID + socket path
+│   ├── die0.json          # 持久 alias + USB 身份 + daemon 运行信息
 │   ├── die0.pid           # PID file
 │   ├── die1.json
 │   └── die1.pid
@@ -300,12 +324,16 @@ daemon 启动时自动扫描 logs 目录，删除超过 `log_retention_days` 天
 ### 停止
 
 - `serial-mux stop <alias>` 读取 PID file 发送 SIGTERM
-- daemon 收到 SIGTERM 后：关闭串口 → 关闭所有客户端连接 → 删除 socket 文件 → 删除 PID file
+- daemon 收到 SIGTERM 后：关闭串口 → 关闭所有客户端连接 → 删除 socket
+  文件 → 删除 PID file；alias JSON 保留供系统重启恢复
+- `serial-mux stop` 在进程退出后额外删除 alias JSON，表示用户明确取消映射
 
 ### stale PID 检测
 
 - `start` / `status` 时检查 PID file 对应的进程是否存在
-- 进程不在则自动清理 stale PID file 和 socket 文件
+- 进程不在则只清理 stale PID file 和 socket 文件，保留可恢复的 alias JSON
+- 系统重启后，alias 以 `saved` 状态保留，并在下一次 `smtty` 连接时自动恢复
+- 同一次开机检测到 USB 拔出或重新枚举时，自动清除对应串口映射
 
 ## 多串口支持
 
