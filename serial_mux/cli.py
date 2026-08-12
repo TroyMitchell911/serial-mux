@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .config import Config
 from .protocol import sync_read_msg, sync_write_msg
+from .state import info_is_running, reconcile_info
 
 
 def format_uptime(start_time: float) -> str:
@@ -36,14 +37,17 @@ def resolve_alias(config: Config, alias_or_device: str) -> dict:
     # Try as alias first
     info_path = config.run_dir / f"{alias_or_device}.json"
     if info_path.exists():
-        return json.loads(info_path.read_text())
+        try:
+            return reconcile_info(info_path, json.loads(info_path.read_text()))
+        except (json.JSONDecodeError, OSError):
+            return None
     # Try scanning all info files for matching device
     for f in config.run_dir.glob("*.json"):
         try:
-            info = json.loads(f.read_text())
-            if info.get("device") == alias_or_device:
+            info = reconcile_info(f, json.loads(f.read_text()))
+            if info and info.get("device") == alias_or_device:
                 return info
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
     return None
 
@@ -64,11 +68,46 @@ def cmd_start(args):
     config = Config.load()
 
     device = getattr(args, 'device', None)
-    baud = args.baud or config.default_baud
     alias = args.alias
     ssh_target = getattr(args, 'ssh', None)
+    saved = resolve_alias(config, alias) if alias else None
+
+    if saved and info_is_running(saved):
+        print(
+            f"Error: Alias '{saved.get('alias', alias)}' already running "
+            f"(PID {saved.get('pid')})"
+        )
+        sys.exit(1)
+
+    # ``start --alias NAME`` restores a saved mapping. This is also what the
+    # client uses after a reboot. For USB records, resolve_alias() has derived
+    # this device from usb_port; the old persisted TTY name is never used.
+    if saved:
+        if device is None:
+            device = saved.get("device")
+        if ssh_target is None:
+            ssh_target = saved.get("ssh")
+
+    # Starting by device without an explicit alias reuses the name previously
+    # assigned to the same physical USB port.
+    if not alias and device:
+        saved = resolve_alias(config, device)
+        if saved:
+            alias = saved.get("alias")
+
+    baud = (
+        args.baud
+        or (saved.get("baud") if saved else None)
+        or config.default_baud
+    )
 
     if not device and not ssh_target:
+        if saved and saved.get("_device_status") == "unavailable":
+            print(
+                f"Error: Saved USB port for '{saved.get('alias')}' "
+                "is not available"
+            )
+            sys.exit(1)
         print("Error: At least one of DEVICE or --ssh must be specified")
         sys.exit(1)
 
@@ -89,20 +128,36 @@ def cmd_start(args):
     existing = resolve_alias(config, alias)
     if existing:
         pid = existing.get("pid", 0)
-        if is_running(pid):
+        if info_is_running(existing):
             print(f"Error: Alias '{alias}' already running (PID {pid})")
             sys.exit(1)
         else:
-            # Clean up stale files
-            for suffix in [".json", ".pid"]:
-                p = config.run_dir / f"{alias}{suffix}"
-                p.unlink(missing_ok=True)
-            sock = config.sock_dir / f"{alias}.sock"
-            sock.unlink(missing_ok=True)
+            # Keep the JSON recovery record until the replacement daemon has
+            # successfully opened its transport.
+            (config.run_dir / f"{alias}.pid").unlink(missing_ok=True)
+            (config.sock_dir / f"{alias}.sock").unlink(missing_ok=True)
 
     # Import and start daemon
     from .daemon import start_daemon
-    start_daemon(device, baud, alias, foreground=args.foreground, ssh_target=getattr(args, 'ssh', None))
+    start_daemon(
+        device,
+        baud,
+        alias,
+        foreground=args.foreground,
+        ssh_target=ssh_target,
+    )
+
+
+def _remove_alias_files(config: Config, alias: str, remove_info: bool = True):
+    """Remove transient daemon files and, for an explicit stop, its mapping."""
+    paths = [
+        config.run_dir / f"{alias}.pid",
+        config.sock_dir / f"{alias}.sock",
+    ]
+    if remove_info:
+        paths.append(config.run_dir / f"{alias}.json")
+    for path in paths:
+        path.unlink(missing_ok=True)
 
 
 def cmd_stop(args):
@@ -116,19 +171,16 @@ def cmd_stop(args):
     pid = info.get("pid", 0)
     alias = info.get("alias", args.alias)
 
-    if not is_running(pid):
-        print(f"Daemon '{alias}' not running (stale PID {pid}), cleaning up")
-        for suffix in [".json", ".pid"]:
-            p = config.run_dir / f"{alias}{suffix}"
-            p.unlink(missing_ok=True)
-        sock = config.sock_dir / f"{alias}.sock"
-        sock.unlink(missing_ok=True)
+    if not info_is_running(info):
+        print(f"Daemon '{alias}' not running; removing saved mapping")
+        _remove_alias_files(config, alias)
         return
 
     os.kill(pid, signal.SIGTERM)
     # Wait for process to exit
     for _ in range(30):
         if not is_running(pid):
+            _remove_alias_files(config, alias)
             print(f"Daemon '{alias}' stopped")
             return
         time.sleep(0.1)
@@ -137,39 +189,38 @@ def cmd_stop(args):
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    _remove_alias_files(config, alias)
     print(f"Daemon '{alias}' killed")
 
 
 def _prune_stale(config: Config):
-    """Remove metadata for daemons whose PID is no longer running."""
+    """Remove stale PID/socket files while retaining recoverable mappings."""
     for f in list(config.run_dir.glob("*.json")):
         try:
-            info = json.loads(f.read_text())
-            if not is_running(info.get("pid", 0)):
+            info = reconcile_info(f, json.loads(f.read_text()))
+            if info and not info_is_running(info):
                 alias = info.get("alias", f.stem)
-                for suffix in [".json", ".pid"]:
-                    (config.run_dir / f"{alias}{suffix}").unlink(missing_ok=True)
-                (config.sock_dir / f"{alias}.sock").unlink(missing_ok=True)
-        except Exception:
+                _remove_alias_files(config, alias, remove_info=False)
+        except (json.JSONDecodeError, OSError):
             pass
 
 
 def cmd_list(args):
-    """List all running daemons."""
+    """List running daemons and saved mappings."""
     config = Config.load()
     _prune_stale(config)
     infos = []
     for f in sorted(config.run_dir.glob("*.json")):
         try:
-            info = json.loads(f.read_text())
-            pid = info.get("pid", 0)
-            info["_running"] = is_running(pid)
-            infos.append(info)
-        except Exception:
+            info = reconcile_info(f, json.loads(f.read_text()))
+            if info:
+                info["_running"] = info_is_running(info)
+                infos.append(info)
+        except (json.JSONDecodeError, OSError):
             pass
 
     if not infos:
-        print("No daemons running")
+        print("No daemons or saved mappings")
         return
 
     print(f"{'ALIAS':<12} {'DEVICE':<20} {'BAUD':<10} {'PID':<8} {'CLIENTS':<9} {'UPTIME':<12} {'STATUS':<10} {'SSH':<20}")
@@ -178,9 +229,9 @@ def cmd_list(args):
         alias = info.get("alias", "?")
         device = info.get("device") or "-"
         baud = info.get("baud", "?")
-        pid = info.get("pid", "?")
-        status = "running" if info["_running"] else "dead"
-        clients = info.get("clients_count", "?")
+        pid = info.get("pid", "?") if info["_running"] else "-"
+        status = "running" if info["_running"] else "saved"
+        clients = info.get("clients_count", "?") if info["_running"] else "-"
         start_time = info.get("start_time")
         uptime = format_uptime(start_time) if start_time and info["_running"] else "-"
         ssh = info.get("ssh") or "-"
@@ -197,18 +248,21 @@ def cmd_status(args):
 
     alias = info.get("alias", args.alias)
     pid = info.get("pid", 0)
-    running = is_running(pid)
+    running = info_is_running(info)
 
     print(f"Alias:   {alias}")
     print(f"Device:  {info.get('device') or 'none'}")
     print(f"Baud:    {info.get('baud', '?')}")
-    print(f"PID:     {pid}")
-    print(f"Status:  {'running' if running else 'dead'}")
-    print(f"Clients: {info.get('clients_count', '?')}")
+    print(f"PID:     {pid if running else 'none'}")
+    print(f"Status:  {'running' if running else 'saved'}")
+    print(f"Clients: {info.get('clients_count', '?') if running else '-'}")
     start_time = info.get("start_time")
     if start_time and running:
         print(f"Uptime:  {format_uptime(start_time)}")
     print(f"Socket:  {info.get('socket', '?')}")
+    usb_port = info.get("usb_port")
+    if usb_port:
+        print(f"USB Port: {usb_port}")
     ssh = info.get("ssh")
     print(f"SSH:     {ssh if ssh else 'none'}")
 
@@ -231,7 +285,7 @@ def cmd_set_baud(args):
     pid = info.get("pid", 0)
     alias = info.get("alias", args.alias)
 
-    if not is_running(pid):
+    if not info_is_running(info):
         print(f"Error: Daemon '{alias}' is not running")
         sys.exit(1)
 
@@ -288,7 +342,7 @@ def _send_daemon_msg(alias: str, msg: dict, expect_type: str = None) -> dict:
         print(f"Error: No daemon found for '{alias}'")
         sys.exit(1)
     pid = info.get("pid", 0)
-    if not is_running(pid):
+    if not info_is_running(info):
         print(f"Error: Daemon '{info.get('alias', alias)}' is not running")
         sys.exit(1)
     sock_path = info.get("socket")
@@ -396,7 +450,7 @@ def main():
     p_stop.set_defaults(func=cmd_stop)
 
     # list
-    p_list = sub.add_parser("list", help="List running daemons")
+    p_list = sub.add_parser("list", help="List daemons and saved mappings")
     p_list.set_defaults(func=cmd_list)
 
     # status

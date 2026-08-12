@@ -18,68 +18,78 @@ from datetime import datetime
 
 from .config import Config
 from .protocol import sync_read_msg, sync_write_msg, b64, unb64
+from .state import info_is_running, reconcile_info
+
+
+def _load_alias_info(config: Config, alias: str) -> dict | None:
+    """Load and reconcile an alias record before it is used for recovery."""
+    info_path = config.run_dir / f"{alias}.json"
+    if not info_path.exists():
+        return None
+    try:
+        return reconcile_info(info_path, json.loads(info_path.read_text()))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def resolve_socket(config: Config, alias: str) -> str:
     """Resolve alias to socket path."""
-    info_path = config.run_dir / f"{alias}.json"
-    if info_path.exists():
-        info = json.loads(info_path.read_text())
+    info = _load_alias_info(config, alias)
+    if info:
         return info.get("socket", "")
     # Try as device path
     for f in config.run_dir.glob("*.json"):
         try:
-            info = json.loads(f.read_text())
-            if info.get("device") == alias:
+            info = reconcile_info(f, json.loads(f.read_text()))
+            if info and info.get("device") == alias:
                 return info.get("socket", "")
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             pass
     return ""
 
 
 def _is_daemon_dead(config: Config, alias: str) -> bool:
-    """Check if daemon for alias has a metadata file but process is dead."""
-    info_path = config.run_dir / f"{alias}.json"
-    if not info_path.exists():
-        return False
-    try:
-        info = json.loads(info_path.read_text())
-        pid = info.get("pid", 0)
-        os.kill(pid, 0)
-        return False  # still alive
-    except ProcessLookupError:
-        return True
-    except (PermissionError, ValueError, json.JSONDecodeError):
-        return False
+    """Check if an alias has saved state but no daemon in this boot."""
+    info = _load_alias_info(config, alias)
+    return bool(info and not info_is_running(info))
 
 
 def _auto_resume_daemon(config: Config, alias: str) -> bool:
     """Attempt to restart a dead daemon from its saved metadata. Returns True on success."""
-    info_path = config.run_dir / f"{alias}.json"
-    if not info_path.exists():
-        return False
-    try:
-        info = json.loads(info_path.read_text())
-    except (json.JSONDecodeError, OSError):
+    info = _load_alias_info(config, alias)
+    if not info:
         return False
 
     device = info.get("device")
     baud = info.get("baud", 115200)
     ssh_target = info.get("ssh")
+    has_usb_mapping = bool(info.get("usb_port"))
 
-    if not device and not ssh_target:
+    if (
+        has_usb_mapping
+        and info.get("_device_status") == "unavailable"
+        and not ssh_target
+    ):
+        print(
+            f"Error: Saved USB port for '{alias}' is not available",
+            file=sys.stderr,
+        )
         return False
 
-    # Clean up stale files before restarting
-    for suffix in [".json", ".pid"]:
-        p = config.run_dir / f"{alias}{suffix}"
-        p.unlink(missing_ok=True)
+    if not has_usb_mapping and not device and not ssh_target:
+        return False
+
+    # Clean up only transient files. Keep the mapping until the replacement
+    # daemon has successfully opened its transport.
+    (config.run_dir / f"{alias}.pid").unlink(missing_ok=True)
     sock_file = config.sock_dir / f"{alias}.sock"
     sock_file.unlink(missing_ok=True)
 
     # Build the serial-mux start command
     cmd = [sys.executable, "-m", "serial_mux.cli", "start", "--alias", alias]
-    if device:
+    # USB aliases are restored by name so the CLI performs a fresh sysfs
+    # reverse lookup. Never feed the last /dev/ttyUSB* name back into start.
+    if device and not has_usb_mapping:
         cmd.append(device)
         cmd.extend(["--baud", str(baud)])
     if ssh_target:
