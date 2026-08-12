@@ -1,5 +1,6 @@
 """Tests for reboot-safe alias state and USB hotplug detection."""
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -217,8 +218,7 @@ def test_serial_read_propagates_disconnect_error(tmp_config):
         daemon._serial_read()
 
 
-@pytest.mark.asyncio
-async def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
+def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
     class DisconnectedSerial:
         is_open = True
 
@@ -248,7 +248,7 @@ async def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
 
     monkeypatch.setattr(daemon, "_broadcast", capture)
 
-    await daemon._serial_reader()
+    asyncio.run(daemon._serial_reader())
 
     info = json.loads(daemon._info_path().read_text())
     assert daemon.device is None
