@@ -99,9 +99,11 @@ daemon 同时管理串口和 SSH 两个 I/O 通道。当 SSH 已连接时，所�
 ### 串口自动重绑
 
 - 串口意外丢失（拔插、供电抖动、重新枚举）→ daemon 不退出，关闭失效端口，广播 `serial_lost`
-- daemon 保留物理 USB 端口身份（`usb_port`），按 `serial_reconnect_interval` 轮询 sysfs
-- 设备重新出现（即使设备名变化，如 ttyUSB1 → ttyUSB0）→ 自动重开串口、广播 `serial_restored`，恢复扇出
-- 显式 `serial-unbind` → 清除端口身份，不再自动重绑
+- daemon 保留设备身份（物理 USB 端口 + VID/PID + serial），按 `serial_reconnect_interval` 轮询 sysfs
+- 设备重新出现（即使设备名变化，如 ttyUSB1 → ttyUSB0）且身份匹配 → 自动重开串口、广播 `serial_restored`，恢复扇出
+- 同一端口出现不同设备（VID/PID 或 serial 不符）→ 拒绝并继续等待，不静默绑定错误设备
+- 无 serial 的设备只能按端口 + VID/PID 尽力匹配；`serial_reconnect_interval: 0` 或没有 `usb_port` → 停止自动重绑
+- 显式 `serial-unbind` → 清除设备身份，不再自动重绑
 
 ### 客户端自动重连
 

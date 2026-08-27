@@ -12,40 +12,6 @@ from serial_mux import state
 from serial_mux.daemon import SerialDaemon
 
 
-@pytest.fixture
-def fake_usb_sysfs(tmp_path, monkeypatch):
-    sys_devices = tmp_path / "sys" / "devices"
-    sys_class_tty = tmp_path / "sys" / "class" / "tty"
-    dev_dir = tmp_path / "dev"
-    boot_id_path = tmp_path / "boot_id"
-
-    usb_device = sys_devices / "pci0000:00" / "usb1" / "1-2"
-    interface = usb_device / "1-2:1.0"
-    tty_device = interface / "ttyUSB0"
-    tty_device.mkdir(parents=True)
-    (usb_device / "busnum").write_text("1\n")
-    (usb_device / "devnum").write_text("4\n")
-
-    tty_class = sys_class_tty / "ttyUSB0"
-    tty_class.mkdir(parents=True)
-    (tty_class / "device").symlink_to(tty_device, target_is_directory=True)
-    dev_dir.mkdir()
-    boot_id_path.write_text("boot-a\n")
-
-    monkeypatch.setattr(state, "SYS_DEVICES", sys_devices)
-    monkeypatch.setattr(state, "SYS_CLASS_TTY", sys_class_tty)
-    monkeypatch.setattr(state, "DEV_DIR", dev_dir)
-    monkeypatch.setattr(state, "BOOT_ID_PATH", boot_id_path)
-
-    return {
-        "boot_id": boot_id_path,
-        "class_tty": sys_class_tty,
-        "dev_dir": dev_dir,
-        "interface": interface,
-        "usb_device": usb_device,
-    }
-
-
 def test_usb_port_survives_reboot_and_resolves_new_tty(
     tmp_path, fake_usb_sysfs
 ):
@@ -218,7 +184,7 @@ def test_serial_read_propagates_disconnect_error(tmp_config):
         daemon._serial_read()
 
 
-def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
+def test_serial_disconnect_keeps_identity_clears_device(tmp_config, monkeypatch):
     class DisconnectedSerial:
         is_open = True
 
@@ -229,9 +195,6 @@ def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
     daemon.ser = DisconnectedSerial()
     daemon.running = True
     daemon._usb_info = {"usb_port": "port", "usb_instance": "1:4"}
-    # No recoverable device to poll, so the reader stops after dropping the
-    # dead serial port instead of reconnecting forever.
-    daemon._last_device_path = None
     daemon._write_info()
     monkeypatch.setattr(
         daemon,
@@ -256,7 +219,10 @@ def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
     info = json.loads(daemon._info_path().read_text())
     assert daemon.device is None
     assert info["device"] is None
-    assert "usb_port" not in info
+    # The physical port identity survives so a restarted daemon can recover;
+    # only the stale enumeration instance is dropped.
+    assert info["usb_port"] == "port"
+    assert "usb_instance" not in info
     assert broadcasts == [{"type": "serial_lost", "reason": "unplugged"}]
 
 

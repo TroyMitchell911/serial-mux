@@ -262,14 +262,16 @@ serial-mux 面向硬件 bring-up 中常见的瞬断场景设计：开发板复�
 
 ### 串口丢失与恢复
 
-当 daemon 的串口传输消失（拔插、供电抖动、设备从 `/dev/ttyUSB1` 重新枚举为 `/dev/ttyUSB0`）时，daemon **不会退出**。它会关闭失效端口、记住物理 USB 端口身份，并轮询 sysfs 直到设备重新出现，然后自动重新打开并恢复扇出。连接的客户端会看到每次切换的状态行：
+当 daemon 的串口传输消失（拔插、供电抖动、设备从 `/dev/ttyUSB1` 重新枚举为 `/dev/ttyUSB0`）时，daemon **不会退出**。它会关闭失效端口、记住设备身份，并轮询 sysfs 直到设备重新出现，然后自动重新打开并恢复扇出。连接的客户端会看到每次切换的状态行：
 
 ```
 --- serial device lost: USB serial port was unplugged or re-enumerated — waiting to reconnect ---
 --- serial restored: /dev/ttyUSB0 ---
 ```
 
-恢复依赖启动 alias 时记录的物理 USB 端口（`usb_port`），因此即使内核给适配器分配了新的设备名也能找回。显式执行 `serial-mux serial-unbind <alias>` 仍然会彻底停用该端口——自动重绑只针对**意外**丢失。设置 `serial_reconnect_interval: 0` 可关闭该功能。
+恢复匹配的是原始**设备**，而不是某个端口或转瞬即逝的 `/dev/ttyUSB*` 名字。设备身份由物理 USB 端口 + VID/PID 组成，并在适配器提供 USB serial 时一并校验。如果同一端口上出现了另一只设备（VID/PID 或 serial 不同），daemon 会继续等待而不是静默绑定错误设备。没有唯一 serial 的适配器只能按端口 + VID/PID 尽力匹配。
+
+显式执行 `serial-mux serial-unbind <alias>` 仍然会彻底停用该端口——自动重绑只针对**意外**丢失。设置 `serial_reconnect_interval: 0` 可完全关闭自动重绑（停止轮询，而不是空转）。
 
 ### 客户端重连 daemon
 

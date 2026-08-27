@@ -278,21 +278,26 @@ restarts — without the operator restarting anything by hand.
 
 When the daemon's serial transport disappears (unplug, power glitch, or a
 re-enumeration that moves the device from `/dev/ttyUSB1` to `/dev/ttyUSB0`),
-the daemon does **not** exit. It closes the dead port, remembers the physical
-USB port identity, and polls sysfs until the device reappears. When it does, the
-daemon re-opens it and resumes fan-out automatically. Connected clients see a
-status line for each transition:
+the daemon does **not** exit. It closes the dead port, remembers the device
+identity, and keeps polling sysfs until the device reappears. Connected clients
+see a status line for each transition:
 
 ```
 --- serial device lost: USB serial port was unplugged or re-enumerated — waiting to reconnect ---
 --- serial restored: /dev/ttyUSB0 ---
 ```
 
-Recovery uses the physical USB port (the `usb_port` recorded when the alias was
-started), so it works even when the kernel assigns the adapter a new device
-name. An explicit `serial-mux serial-unbind <alias>` still disables the port
+Recovery matches the original **device**, not just a port or a transient
+`/dev/ttyUSB*` name. The identity is the physical USB port plus VID/PID, and the
+USB serial number when the adapter exposes one. If a different device appears on
+the same port (different VID/PID or serial), the daemon keeps waiting instead of
+silently binding it. Adapters without a unique serial number can only be matched
+best-effort by port + VID/PID.
+
+An explicit `serial-mux serial-unbind <alias>` still disables the port
 completely — auto-rebind only applies after an *unexpected* loss. Set
-`serial_reconnect_interval: 0` to turn it off.
+`serial_reconnect_interval: 0` to turn auto-rebind off entirely (it stops
+polling rather than busy-looping).
 
 ### Client reconnection to the daemon
 
