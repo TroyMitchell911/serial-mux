@@ -96,6 +96,19 @@ daemon 同时管理串口和 SSH 两个 I/O 通道。当 SSH 已连接时，所�
 - `ssh-unbind` → 立即切回串口
 - 串口 + SSH 同时绑定时，SSH 优先；SSH 不可用时串口接管
 
+### 串口自动重绑
+
+- 串口意外丢失（拔插、供电抖动、重新枚举）→ daemon 不退出，关闭失效端口，广播 `serial_lost`
+- daemon 保留物理 USB 端口身份（`usb_port`），按 `serial_reconnect_interval` 轮询 sysfs
+- 设备重新出现（即使设备名变化，如 ttyUSB1 → ttyUSB0）→ 自动重开串口、广播 `serial_restored`，恢复扇出
+- 显式 `serial-unbind` → 清除端口身份，不再自动重绑
+
+### 客户端自动重连
+
+- daemon 进程消失 → `smtty` 不再退出，每 `client_reconnect_interval` 秒重试
+- 尽可能从保存元数据自动恢复已死的 daemon，重连后回放 scrollback 历史
+- `Ctrl+]` 随时 detach 并停止重试；`client_reconnect_attempts`（0 = 无限）限制次数
+
 ## alias 机制
 
 设备路径在系统重启后可能变化（例如 ttyUSB0 变成 ttyUSB1）。alias 记录物理 USB
@@ -224,6 +237,9 @@ default_baud: 115200        # 默认波特率
 scrollback_lines: 5000      # attach 时回放的历史行数
 ssh_connect_timeout: 3      # SSH ConnectTimeout（秒）
 ssh_probe_timeout: 5        # SSH 探测等待时间（秒），超时判定连接成功
+serial_reconnect_interval: 1.0  # daemon 轮询 sysfs 等待丢失的 USB 串口重新出现的间隔（秒），0 禁用自动重绑
+client_reconnect_interval: 1.0  # smtty 客户端重连 daemon socket 的间隔（秒）
+client_reconnect_attempts: 0    # smtty 最大重连次数（0 = 无限重试）
 ```
 
 - 所有配置项都有合理默认值，config 文件可选

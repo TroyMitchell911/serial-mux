@@ -256,6 +256,25 @@ alias 映射存储在 `~/.serial-mux/run/<alias>.json`：
 
 客户端使用 alias 连接时优先查找映射，未匹配时当设备路径处理。
 
+## 自动重连
+
+serial-mux 面向硬件 bring-up 中常见的瞬断场景设计：开发板复位、USB 串口重新枚举、daemon 重启，都不需要人工重启任何东西。
+
+### 串口丢失与恢复
+
+当 daemon 的串口传输消失（拔插、供电抖动、设备从 `/dev/ttyUSB1` 重新枚举为 `/dev/ttyUSB0`）时，daemon **不会退出**。它会关闭失效端口、记住物理 USB 端口身份，并轮询 sysfs 直到设备重新出现，然后自动重新打开并恢复扇出。连接的客户端会看到每次切换的状态行：
+
+```
+--- serial device lost: USB serial port was unplugged or re-enumerated — waiting to reconnect ---
+--- serial restored: /dev/ttyUSB0 ---
+```
+
+恢复依赖启动 alias 时记录的物理 USB 端口（`usb_port`），因此即使内核给适配器分配了新的设备名也能找回。显式执行 `serial-mux serial-unbind <alias>` 仍然会彻底停用该端口——自动重绑只针对**意外**丢失。设置 `serial_reconnect_interval: 0` 可关闭该功能。
+
+### 客户端重连 daemon
+
+如果 daemon 进程本身消失（崩溃、重启或 `kill`），交互式客户端 `smtty` 不再退出。它会每 `client_reconnect_interval` 秒重试连接，尽可能从保存的元数据自动恢复已死的 daemon，并在恢复实时 I/O 前回放 scrollback 历史。任何时候按 `Ctrl+]` 都可以 detach 并停止重试。`client_reconnect_attempts` 限制重试次数（0 = 无限重试）。
+
 ## 配置文件
 
 路径：`~/.config/serial-mux/config.yaml`
@@ -266,6 +285,9 @@ default_baud: 115200        # 默认波特率
 scrollback_lines: 5000      # attach 时回放的历史行数
 ssh_connect_timeout: 3      # SSH ConnectTimeout（秒）
 ssh_probe_timeout: 5        # SSH 探测等待时间（秒），超时判定连接成功
+serial_reconnect_interval: 1.0  # daemon 轮询 sysfs 等待丢失的 USB 串口重新出现的间隔（秒），0 禁用自动重绑
+client_reconnect_interval: 1.0  # smtty 客户端重连 daemon socket 的间隔（秒）
+client_reconnect_attempts: 0    # smtty 最大重连次数（0 = 无限重试）
 ```
 
 所有配置项都有合理默认值，配置文件可选。daemon 启动时读取配置。

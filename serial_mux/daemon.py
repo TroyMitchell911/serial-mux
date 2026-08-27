@@ -24,7 +24,13 @@ from .protocol import (
     HEADER_SIZE,
     MAX_MSG_SIZE,
 )
-from .state import get_boot_id, inspect_usb_device, mark_info_saved, write_info
+from .state import (
+    get_boot_id,
+    inspect_usb_device,
+    find_usb_device,
+    mark_info_saved,
+    write_info,
+)
 
 logger = logging.getLogger("serial-mux-daemon")
 
@@ -73,6 +79,13 @@ class SerialDaemon:
         self._serial_task: Optional[asyncio.Task] = None
         self.boot_id = get_boot_id()
         self._usb_info = inspect_usb_device(device)
+        # Physical USB port identity, kept across a hotplug so the daemon can
+        # re-discover the device after it re-enumerates. Cleared only by an
+        # explicit ``serial-unbind``.
+        self._usb_port = self._usb_info.get("usb_port")
+        # Last bound device node path, kept across a hotplug as a fallback so
+        # ``_wait_for_serial`` can keep polling it even without a USB identity.
+        self._last_device_path = device
         self._last_usb_check = 0.0
 
     def _info_path(self) -> Path:
@@ -198,11 +211,23 @@ class SerialDaemon:
         logger.info(f"Opened {self.device} at {self.baud} baud")
 
     async def _serial_reader(self):
-        """Read from serial port and fan out to all clients."""
+        """Read from serial port and fan out to all clients.
+
+        When the serial transport is lost it automatically re-binds the device
+        once it reappears (via the persisted physical USB port), so a board
+        reset or USB re-enumeration recovers without restarting the daemon.
+        """
         loop = asyncio.get_event_loop()
         line_buf = bytearray()
 
         while self.running:
+            # No open serial port — wait for one to (re)appear.
+            if not self.ser or not self.ser.is_open:
+                if not await self._wait_for_serial():
+                    break
+                line_buf.clear()
+                continue
+
             try:
                 data = await loop.run_in_executor(None, self._serial_read)
                 if not data:
@@ -223,24 +248,89 @@ class SerialDaemon:
                         line_buf.append(byte)
 
             except (serial.SerialException, OSError) as e:
-                logger.error(f"Serial error: {e}, unbinding serial")
-                # Don't kill the daemon — just unbind the dead serial port
-                if self.ser:
-                    try:
-                        self.ser.close()
-                    except Exception:
-                        pass
-                    self.ser = None
-                self.device = None
-                self._usb_info = {}
-                self._write_info()
-                await self._broadcast({"type": "serial_lost", "reason": str(e)})
-                break
+                logger.error(f"Serial error: {e}, dropping serial")
+                # Flush a partial line so it is not silently lost.
+                if line_buf:
+                    line = line_buf.decode("utf-8", errors="replace").rstrip("\r")
+                    self._log_write(f"[{self._timestamp()}] {line}")
+                    line_buf.clear()
+                await self._drop_serial(str(e))
+                # Loop continues — _wait_for_serial() re-binds when ready.
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Serial reader error: {e}")
                 await asyncio.sleep(0.1)
+
+    async def _drop_serial(self, reason: str) -> None:
+        """Close a dead serial port and notify clients, keeping the daemon alive.
+
+        The physical USB port identity (``_usb_port``) is deliberately retained
+        so ``_wait_for_serial`` can re-discover the device after a hotplug.
+        """
+        if self.ser:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+        self.device = None
+        self._usb_info = {}
+        self._write_info()
+        await self._broadcast({"type": "serial_lost", "reason": reason})
+
+    async def _wait_for_serial(self) -> bool:
+        """Keep polling for the serial device to reappear and re-bind it.
+
+        Polls the physical USB port (via sysfs) when its identity is known, so
+        a re-enumeration to a new ``/dev/ttyUSB*`` name is handled. Otherwise it
+        falls back to polling the last bound device node path directly. Returns
+        False only when the daemon is shutting down or no device was recorded.
+        """
+        if not self._usb_port and not self._last_device_path:
+            return False
+        loop = asyncio.get_event_loop()
+        while self.running:
+            device = None
+            usb_info = {}
+            if self._usb_port:
+                try:
+                    device, usb_info = await loop.run_in_executor(
+                        None, find_usb_device, self._usb_port
+                    )
+                except Exception as e:
+                    logger.warning(f"Serial auto-reconnect lookup failed: {e}")
+            elif self._last_device_path:
+                # Fallback: keep polling the previously bound device node.
+                exists = await loop.run_in_executor(
+                    None, Path(self._last_device_path).exists
+                )
+                if exists:
+                    device = self._last_device_path
+            if device:
+                try:
+                    self.device = device
+                    self._open_serial()
+                    if not usb_info:
+                        usb_info = inspect_usb_device(device)
+                    self._usb_info = usb_info
+                    self._usb_port = self._usb_info.get("usb_port") or self._usb_port
+                    self._last_usb_check = 0.0
+                    self._write_info()
+                    logger.info(f"Serial restored: {device} @ {self.baud} baud")
+                    await self._broadcast({"type": "serial_restored", "device": device})
+                    return True
+                except (serial.SerialException, OSError) as e:
+                    logger.warning(f"Serial auto-reconnect failed for {device}: {e}")
+                    if self.ser:
+                        try:
+                            self.ser.close()
+                        except Exception:
+                            pass
+                        self.ser = None
+                    self.device = None
+            await asyncio.sleep(self.config.serial_reconnect_interval)
+        return False
 
     def _serial_read(self) -> bytes:
         """Blocking serial read (called in executor)."""
@@ -575,9 +665,11 @@ class SerialDaemon:
         await self.unbind_serial()
         try:
             self.device = device
+            self._last_device_path = device
             self.baud = baud
             self._open_serial()
             self._usb_info = inspect_usb_device(device)
+            self._usb_port = self._usb_info.get("usb_port")
             self._last_usb_check = 0.0
             self._serial_task = asyncio.create_task(self._serial_reader())
             self._write_info()
@@ -587,6 +679,8 @@ class SerialDaemon:
             logger.error(f"Failed to open serial {device}: {e}")
             self.device = None
             self._usb_info = {}
+            self._usb_port = None
+            self._last_device_path = None
             self._write_info()
             return False, str(e)
 
@@ -604,6 +698,8 @@ class SerialDaemon:
             self.ser = None
         self.device = None
         self._usb_info = {}
+        self._usb_port = None
+        self._last_device_path = None
         self._write_info()
         logger.info("Serial unbound")
 

@@ -229,6 +229,9 @@ def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
     daemon.ser = DisconnectedSerial()
     daemon.running = True
     daemon._usb_info = {"usb_port": "port", "usb_instance": "1:4"}
+    # No recoverable device to poll, so the reader stops after dropping the
+    # dead serial port instead of reconnecting forever.
+    daemon._last_device_path = None
     daemon._write_info()
     monkeypatch.setattr(
         daemon,
