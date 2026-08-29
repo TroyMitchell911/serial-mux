@@ -97,14 +97,18 @@ port and resumes the daemon. It can also be restored explicitly:
 serial-mux start --alias die0
 ```
 
-`usb_port` is the only persistent lookup key. Recovery scans `/sys/class/tty`
-for that physical port and derives a temporary `/dev/ttyUSBx` path only when
-opening the serial port. The previous TTY name is never matched or fed back
-into `start`; `device` is cleared from the saved record when the daemon exits.
+`usb_port` is the only persistent lookup key. The port is resolved to its
+current `/dev/ttyUSBx` node via udev's stable `/dev/serial/by-path` symlinks
+(falling back to a sysfs scan), so the previous TTY name is never matched or
+fed back into `start`; `device` is cleared from the saved record when the
+daemon exits.
 
-An unplug or re-enumeration during the same boot invalidates the old serial
-mapping. It is never silently assigned to a device plugged in later; use
-`serial-bind` on the surviving daemon or start a new mapping explicitly.
+An unplug or re-enumeration during the same boot does **not** invalidate the
+mapping — that is exactly the EMI / hotplug-recovery case. The alias stays
+bound to its physical port and is recovered when the device reappears. The
+mapping is only invalidated when a *different* device (different VID/PID, or
+USB serial when present) takes over the port. Use `serial-bind` on the
+surviving daemon or start a new mapping explicitly for a true device swap.
 
 #### Bind/unbind SSH at runtime
 
@@ -289,10 +293,20 @@ see a status line for each transition:
 
 Recovery matches the original **device**, not just a port or a transient
 `/dev/ttyUSB*` name. The identity is the physical USB port plus VID/PID, and the
-USB serial number when the adapter exposes one. If a different device appears on
-the same port (different VID/PID or serial), the daemon keeps waiting instead of
-silently binding it. Adapters without a unique serial number can only be matched
-best-effort by port + VID/PID.
+USB serial number when the adapter exposes one. The port is resolved through
+udev's `/dev/serial/by-path` symlinks, which stay stable across re-enumeration
+and node-name changes.
+
+Multi-board note: most FT232/CH340 adapters share VID/PID and expose no unique
+USB serial, so the physical port is the only discriminator. Each daemon polls
+its own recorded port, so when several boards drop and come back in a different
+order (kernel may hand out node names like `ttyUSB0`/`ttyUSB1` in a different
+arrangement), every daemon still re-binds its own physical device; the tty
+names in `serial-mux list` may be swapped but each alias keeps talking to the
+right board. If a *different* device appears on a port (different VID/PID or
+serial), the daemon keeps waiting instead of silently binding it. For identical
+adapters physically swapped between ports, no software can tell — re-run
+`serial-bind` to re-map explicitly.
 
 An explicit `serial-mux serial-unbind <alias>` still disables the port
 completely — auto-rebind only applies after an *unexpected* loss. Set

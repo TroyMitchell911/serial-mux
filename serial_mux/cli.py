@@ -108,8 +108,9 @@ def cmd_start(args):
                 "is not available"
             )
             sys.exit(1)
-        print("Error: At least one of DEVICE or --ssh must be specified")
-        sys.exit(1)
+        if not (saved and saved.get("usb_port")):
+            print("Error: At least one of DEVICE or --ssh must be specified")
+            sys.exit(1)
 
     if not alias:
         if device:
@@ -145,6 +146,7 @@ def cmd_start(args):
         alias,
         foreground=args.foreground,
         ssh_target=ssh_target,
+        saved_info=saved,
     )
 
 

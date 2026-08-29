@@ -99,7 +99,8 @@ daemon 同时管理串口和 SSH 两个 I/O 通道。当 SSH 已连接时，所�
 ### 串口自动重绑
 
 - 串口意外丢失（拔插、供电抖动、重新枚举）→ daemon 不退出，关闭失效端口，广播 `serial_lost`
-- daemon 保留设备身份（物理 USB 端口 + VID/PID + serial），按 `serial_reconnect_interval` 轮询 sysfs
+- daemon 保留设备身份（物理 USB 端口 + VID/PID + serial），按 `serial_reconnect_interval` 轮询
+- 端口优先通过 udev `/dev/serial/by-path` 稳定符号链接解析当前 tty 节点，回退到 `/sys/class/tty` 扫描
 - 设备重新出现（即使设备名变化，如 ttyUSB1 → ttyUSB0）且身份匹配 → 自动重开串口、广播 `serial_restored`，恢复扇出
 - 同一端口出现不同设备（VID/PID 或 serial 不符）→ 拒绝并继续等待，不静默绑定错误设备
 - 无 serial 的设备只能按端口 + VID/PID 尽力匹配；`serial_reconnect_interval: 0` 或没有 `usb_port` → 停止自动重绑
@@ -114,11 +115,14 @@ daemon 同时管理串口和 SSH 两个 I/O 通道。当 SSH 已连接时，所�
 ## alias 机制
 
 设备路径在系统重启后可能变化（例如 ttyUSB0 变成 ttyUSB1）。alias 记录物理 USB
-端口、boot ID 与枚举实例：跨系统重启时按物理端口恢复；同一次开机中的 USB
-拔出或重新枚举则清除旧串口映射，避免 alias 错绑到后来插入的设备。
+端口、boot ID 与枚举实例：跨系统重启时按物理端口恢复。同一次开机中的 USB
+拔出或重新枚举**不**清除映射——那是 EMI/热插拔恢复场景，alias 始终绑定其
+物理端口；只有身份不匹配（VID/PID 或 serial 不同）的另一只设备占用该端口
+时才清除映射。
 
-持久恢复只以 `usb_port` 为键，扫描 `/sys/class/tty/*/device` 反查当前 tty。
-`device` 是运行态结果，daemon 退出时写为 `null`，不参与重启后的匹配。
+持久恢复只以 `usb_port` 为键，优先通过 udev `/dev/serial/by-path` 符号链接
+反查当前 tty，回退到 `/sys/class/tty/*/device` 扫描。`device` 是运行态结果，
+daemon 退出时写为 `null`，不参与重启后的匹配。
 
 alias 映射存储在 `~/.serial-mux/run/<alias>.json`：
 

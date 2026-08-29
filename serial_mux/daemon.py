@@ -61,7 +61,14 @@ def validate_ssh_target(target: str) -> tuple[bool, str]:
 
 
 class SerialDaemon:
-    def __init__(self, device: Optional[str], baud: int, alias: str, config: Config):
+    def __init__(
+        self,
+        device: Optional[str],
+        baud: int,
+        alias: str,
+        config: Config,
+        saved_info: Optional[dict] = None,
+    ):
         self.device = device
         self.baud = baud
         self.alias = alias
@@ -79,6 +86,15 @@ class SerialDaemon:
         self._serial_task: Optional[asyncio.Task] = None
         self.boot_id = get_boot_id()
         self._usb_info = inspect_usb_device(device)
+        if not self._usb_info and saved_info:
+            # Resuming with no live device node (e.g. the board is still
+            # offline after an EMI event): inherit the saved USB identity so
+            # the daemon can poll for the device to reappear.
+            self._usb_info = {
+                field: saved_info[field]
+                for field in ("usb_port", "usb_vid", "usb_pid", "usb_serial")
+                if saved_info.get(field)
+            }
         # Physical USB port identity, kept across a hotplug so the daemon can
         # re-discover the device after it re-enumerates. Cleared only by an
         # explicit ``serial-unbind``.
@@ -551,9 +567,11 @@ class SerialDaemon:
         # Load existing history into ring buffer
         self.log_lines = self._load_history()
 
-        # Open serial if device specified
-        if self.device:
-            self._open_serial()
+        # Open serial if a device is known, or start the reader anyway so a
+        # device-less resume can poll for the saved USB port to reappear.
+        if self.device or self._usb_port:
+            if self.device:
+                self._open_serial()
             self._serial_task = asyncio.create_task(self._serial_reader())
 
         # Only publish a recoverable mapping after the serial port has opened.
@@ -792,13 +810,23 @@ def daemonize():
     os.close(devnull)
 
 
-def start_daemon(device: Optional[str], baud: int, alias: str, foreground: bool = False, ssh_target: str = None):
+def start_daemon(
+    device: Optional[str],
+    baud: int,
+    alias: str,
+    foreground: bool = False,
+    ssh_target: str = None,
+    saved_info: Optional[dict] = None,
+):
     """Start the daemon process."""
     config = Config.load()
 
     if not device and not ssh_target:
-        print("Error: At least one of device or --ssh must be specified")
-        sys.exit(1)
+        # A recoverable USB mapping (physical port recorded) may be resumed
+        # without a device node: the daemon polls for the port to reappear.
+        if not (saved_info and saved_info.get("usb_port")):
+            print("Error: At least one of device or --ssh must be specified")
+            sys.exit(1)
 
     if not foreground:
         # Check if already running
@@ -867,7 +895,7 @@ def start_daemon(device: Optional[str], baud: int, alias: str, foreground: bool 
             filename=str(log_path),
         )
 
-    daemon = SerialDaemon(device, baud, alias, config)
+    daemon = SerialDaemon(device, baud, alias, config, saved_info=saved_info)
     if ssh_target:
         daemon.ssh_target = ssh_target
     try:

@@ -83,9 +83,53 @@ def test_start_by_saved_alias_restores_device(
 
     cli.cmd_start(args)
 
-    assert started == [
-        ((str(device), 9600, "die0"), {"foreground": True, "ssh_target": None})
-    ]
+    assert len(started) == 1
+    start_args, start_kwargs = started[0]
+    assert start_args == (str(device), 9600, "die0")
+    assert start_kwargs["foreground"] is True
+    assert start_kwargs["ssh_target"] is None
+    assert start_kwargs["saved_info"]["alias"] == "die0"
+
+
+def test_start_recoverable_usb_without_device_is_allowed(
+    tmp_config, monkeypatch
+):
+    """A saved USB mapping may be resumed with no device node: the daemon will
+    poll the physical port until the device reappears (EMI recovery)."""
+    from serial_mux import cli, daemon, state
+
+    (tmp_config.run_dir / "board1.json").write_text(json.dumps({
+        "alias": "board1",
+        "device": None,
+        "baud": 115200,
+        "pid": -1,
+        "socket": str(tmp_config.sock_dir / "board1.sock"),
+        "boot_id": state.get_boot_id(),
+        "usb_port": "pci0000:00/usb/usb-2/usb-2:1.0",
+        "usb_vid": "0403",
+        "usb_pid": "6001",
+    }))
+    monkeypatch.setattr(cli.Config, "load", lambda: tmp_config)
+    started = []
+    monkeypatch.setattr(
+        daemon,
+        "start_daemon",
+        lambda *args, **kwargs: started.append((args, kwargs)),
+    )
+    args = SimpleNamespace(
+        device=None,
+        baud=None,
+        alias="board1",
+        foreground=True,
+        ssh=None,
+    )
+
+    cli.cmd_start(args)
+
+    assert len(started) == 1
+    start_args, start_kwargs = started[0]
+    assert start_args[0] is None  # no device node
+    assert start_kwargs["saved_info"]["usb_port"] == "pci0000:00/usb/usb-2/usb-2:1.0"
 
 
 def test_explicit_stop_removes_saved_mapping(

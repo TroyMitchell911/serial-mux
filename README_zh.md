@@ -252,7 +252,12 @@ alias 映射存储在 `~/.serial-mux/run/<alias>.json`：
 ```
 
 上例是 daemon 未运行时的持久记录。`usb_port` 是恢复主键；`device` 只在 daemon
-运行期间表示本次反查得到的当前设备节点，不用于跨重启匹配。
+运行期间表示本次反查得到的当前设备节点，不用于跨重启匹配。端口通过 udev
+的 `/dev/serial/by-path` 稳定符号链接解析为当前 tty 节点。
+
+同一次开机中的 USB 拔出或重新枚举**不会**使映射失效——这正是 EMI/热插拔
+恢复场景。alias 始终绑定其物理端口，设备重新出现即自动恢复；只有当一只
+*不同* 的设备（VID/PID 或 serial 不同）占用了该端口时才清除映射。
 
 客户端使用 alias 连接时优先查找映射，未匹配时当设备路径处理。
 
@@ -269,7 +274,9 @@ serial-mux 面向硬件 bring-up 中常见的瞬断场景设计：开发板复�
 --- serial restored: /dev/ttyUSB0 ---
 ```
 
-恢复匹配的是原始**设备**，而不是某个端口或转瞬即逝的 `/dev/ttyUSB*` 名字。设备身份由物理 USB 端口 + VID/PID 组成，并在适配器提供 USB serial 时一并校验。如果同一端口上出现了另一只设备（VID/PID 或 serial 不同），daemon 会继续等待而不是静默绑定错误设备。没有唯一 serial 的适配器只能按端口 + VID/PID 尽力匹配。
+恢复匹配的是原始**设备**，而不是某个端口或转瞬即逝的 `/dev/ttyUSB*` 名字。设备身份由物理 USB 端口 + VID/PID 组成，并在适配器提供 USB serial 时一并校验。端口通过 udev 的 `/dev/serial/by-path` 稳定符号链接解析（回退到 sysfs 扫描），跨重新枚举和设备名变化保持不变。
+
+多板场景：绝大多数 FT232/CH340 的 VID/PID 相同且没有唯一 USB serial，物理端口是唯一区分手段。每个 daemon 只轮询自己记录的端口；当多块板子因 EMI 依次断开、又按不同顺序恢复（内核可能把 `ttyUSB0`/`ttyUSB1` 等节点名重新分配），每个 daemon 仍会重绑自己的物理设备——`serial-mux list` 里的 tty 名字可能对调，但每个 alias 依旧连着自己那块板。如果同一端口上出现了另一只设备（VID/PID 或 serial 不同），daemon 会继续等待而不是静默绑定错误设备。真正把两只一模一样的适配器对调端口是软件无法识别的——请显式 `serial-bind` 重新映射。
 
 显式执行 `serial-mux serial-unbind <alias>` 仍然会彻底停用该端口——自动重绑只针对**意外**丢失。设置 `serial_reconnect_interval: 0` 可完全关闭自动重绑（停止轮询，而不是空转）。
 
