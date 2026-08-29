@@ -268,6 +268,46 @@ Non-interactive mode sends each command exactly once on both serial and SSH tran
 | 1    | Connection error |
 | 2    | Timeout waiting for `--wait` pattern |
 
+## Automatic Reconnection
+
+`serial-mux` is designed to survive the transient dropouts that happen during
+hardware bring-up — board resets, USB-serial re-enumeration, and daemon
+restarts — without the operator restarting anything by hand.
+
+### Serial device loss and recovery
+
+When the daemon's serial transport disappears (unplug, power glitch, or a
+re-enumeration that moves the device from `/dev/ttyUSB1` to `/dev/ttyUSB0`),
+the daemon does **not** exit. It closes the dead port, remembers the device
+identity, and keeps polling sysfs until the device reappears. Connected clients
+see a status line for each transition:
+
+```
+--- serial device lost: USB serial port was unplugged or re-enumerated — waiting to reconnect ---
+--- serial restored: /dev/ttyUSB0 ---
+```
+
+Recovery matches the original **device**, not just a port or a transient
+`/dev/ttyUSB*` name. The identity is the physical USB port plus VID/PID, and the
+USB serial number when the adapter exposes one. If a different device appears on
+the same port (different VID/PID or serial), the daemon keeps waiting instead of
+silently binding it. Adapters without a unique serial number can only be matched
+best-effort by port + VID/PID.
+
+An explicit `serial-mux serial-unbind <alias>` still disables the port
+completely — auto-rebind only applies after an *unexpected* loss. Set
+`serial_reconnect_interval: 0` to turn auto-rebind off entirely (it stops
+polling rather than busy-looping).
+
+### Client reconnection to the daemon
+
+If the daemon process itself goes away (crash, reboot, or `kill`), the `smtty`
+interactive client no longer exits. It retries the connection every
+`client_reconnect_interval` seconds, re-resuming a dead daemon from its saved
+metadata when possible, and replays scrollback history before resuming live I/O.
+Press `Ctrl+]` at any time to detach and stop retrying. `client_reconnect_attempts`
+bounds the retries (0 = keep trying forever).
+
 ## Identity Tagging
 
 All data (input and device output) is logged with timestamps. There is no source distinction — both input echo and device responses are recorded in the same format:
@@ -300,6 +340,16 @@ ssh_connect_timeout: 3
 
 # How long to wait for the SSH process — if still alive after this, connection is assumed OK (seconds)
 ssh_probe_timeout: 5
+
+# How often (seconds) the daemon re-checks sysfs for a lost USB serial port
+# to reappear. 0 disables automatic re-binding.
+serial_reconnect_interval: 1.0
+
+# How often (seconds) the smtty client retries a dropped daemon socket.
+client_reconnect_interval: 1.0
+
+# Maximum reconnect attempts for smtty (0 = retry forever).
+client_reconnect_attempts: 0
 ```
 
 ## File Layout

@@ -57,6 +57,15 @@ def _read_sysfs_number(path: Path) -> Optional[str]:
         return None
 
 
+def _read_sysfs_str(path: Path) -> Optional[str]:
+    """Read a sysfs text attribute, returning None when absent or empty."""
+    try:
+        value = path.read_text().strip()
+    except (OSError, ValueError):
+        return None
+    return value or None
+
+
 def inspect_usb_device(device: Optional[str]) -> dict[str, str]:
     """Describe the physical USB port and current USB enumeration instance.
 
@@ -142,14 +151,31 @@ def inspect_usb_tty(tty_name: str) -> dict[str, str]:
     if busnum is None or devnum is None:
         return {}
 
-    return {
+    result = {
         "usb_port": usb_port,
         "usb_instance": f"{busnum}:{devnum}",
     }
+    # Device identity fields used to distinguish two adapters that may share a
+    # physical port over time. ``serial`` is often absent (e.g. an FT232 with an
+    # unprogrammed EEPROM); such devices can only be matched best-effort.
+    vid = _read_sysfs_str(usb_device / "idVendor")
+    pid = _read_sysfs_str(usb_device / "idProduct")
+    serial_no = _read_sysfs_str(usb_device / "serial")
+    if vid:
+        result["usb_vid"] = vid
+    if pid:
+        result["usb_pid"] = pid
+    if serial_no:
+        result["usb_serial"] = serial_no
+    return result
 
 
 def find_usb_device(usb_port: str) -> tuple[Optional[str], dict[str, str]]:
-    """Find the current ``/dev/tty*`` node attached to a saved USB port."""
+    """Find the current ``/dev/tty*`` node attached to a saved USB port.
+
+    Returns ``(None, {})`` when the port is absent or the match is ambiguous,
+    so callers never silently pick an arbitrary device.
+    """
     try:
         tty_entries = sorted(
             SYS_CLASS_TTY.iterdir(), key=lambda path: path.name
@@ -157,10 +183,15 @@ def find_usb_device(usb_port: str) -> tuple[Optional[str], dict[str, str]]:
     except OSError:
         return None, {}
 
+    matches = []
     for entry in tty_entries:
         metadata = inspect_usb_tty(entry.name)
         if metadata.get("usb_port") == usb_port:
-            return str(DEV_DIR / entry.name), metadata
+            matches.append((entry.name, metadata))
+
+    if len(matches) == 1:
+        name, metadata = matches[0]
+        return str(DEV_DIR / name), metadata
     return None, {}
 
 

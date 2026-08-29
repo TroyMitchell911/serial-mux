@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from serial_mux import state
 from serial_mux.config import Config
 from serial_mux.protocol import sync_read_msg, sync_write_msg
 
@@ -26,6 +27,44 @@ def tmp_config(tmp_path):
     cfg.config_dir = tmp_path / "config"
     cfg.ensure_dirs()
     return cfg
+
+
+@pytest.fixture
+def fake_usb_sysfs(tmp_path, monkeypatch):
+    """Build a fake sysfs tree for USB identity inspection."""
+    sys_devices = tmp_path / "sys" / "devices"
+    sys_class_tty = tmp_path / "sys" / "class" / "tty"
+    dev_dir = tmp_path / "dev"
+    boot_id_path = tmp_path / "boot_id"
+
+    usb_device = sys_devices / "pci0000:00" / "usb1" / "1-2"
+    interface = usb_device / "1-2:1.0"
+    tty_device = interface / "ttyUSB0"
+    tty_device.mkdir(parents=True)
+    (usb_device / "busnum").write_text("1\n")
+    (usb_device / "devnum").write_text("4\n")
+    (usb_device / "idVendor").write_text("0403\n")
+    (usb_device / "idProduct").write_text("6001\n")
+    (usb_device / "serial").write_text("FTD12345\n")
+
+    tty_class = sys_class_tty / "ttyUSB0"
+    tty_class.mkdir(parents=True)
+    (tty_class / "device").symlink_to(tty_device, target_is_directory=True)
+    dev_dir.mkdir()
+    boot_id_path.write_text("boot-a\n")
+
+    monkeypatch.setattr(state, "SYS_DEVICES", sys_devices)
+    monkeypatch.setattr(state, "SYS_CLASS_TTY", sys_class_tty)
+    monkeypatch.setattr(state, "DEV_DIR", dev_dir)
+    monkeypatch.setattr(state, "BOOT_ID_PATH", boot_id_path)
+
+    return {
+        "boot_id": boot_id_path,
+        "class_tty": sys_class_tty,
+        "dev_dir": dev_dir,
+        "interface": interface,
+        "usb_device": usb_device,
+    }
 
 
 @pytest.fixture

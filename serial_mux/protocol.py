@@ -23,6 +23,8 @@ Daemon -> Client:
   {"type": "ssh_bind_ack", "target": "...", "ok": true/false, "message": "..."}
   {"type": "serial_bind_ack", "device": "...", "ok": true/false, "message": "..."}
   {"type": "transport_changed", "transport": "ssh"|"serial"}
+  {"type": "serial_lost", "reason": "..."}
+  {"type": "serial_restored", "device": "..."}
 """
 
 import base64
