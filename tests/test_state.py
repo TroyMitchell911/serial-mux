@@ -12,40 +12,6 @@ from serial_mux import state
 from serial_mux.daemon import SerialDaemon
 
 
-@pytest.fixture
-def fake_usb_sysfs(tmp_path, monkeypatch):
-    sys_devices = tmp_path / "sys" / "devices"
-    sys_class_tty = tmp_path / "sys" / "class" / "tty"
-    dev_dir = tmp_path / "dev"
-    boot_id_path = tmp_path / "boot_id"
-
-    usb_device = sys_devices / "pci0000:00" / "usb1" / "1-2"
-    interface = usb_device / "1-2:1.0"
-    tty_device = interface / "ttyUSB0"
-    tty_device.mkdir(parents=True)
-    (usb_device / "busnum").write_text("1\n")
-    (usb_device / "devnum").write_text("4\n")
-
-    tty_class = sys_class_tty / "ttyUSB0"
-    tty_class.mkdir(parents=True)
-    (tty_class / "device").symlink_to(tty_device, target_is_directory=True)
-    dev_dir.mkdir()
-    boot_id_path.write_text("boot-a\n")
-
-    monkeypatch.setattr(state, "SYS_DEVICES", sys_devices)
-    monkeypatch.setattr(state, "SYS_CLASS_TTY", sys_class_tty)
-    monkeypatch.setattr(state, "DEV_DIR", dev_dir)
-    monkeypatch.setattr(state, "BOOT_ID_PATH", boot_id_path)
-
-    return {
-        "boot_id": boot_id_path,
-        "class_tty": sys_class_tty,
-        "dev_dir": dev_dir,
-        "interface": interface,
-        "usb_device": usb_device,
-    }
-
-
 def test_usb_port_survives_reboot_and_resolves_new_tty(
     tmp_path, fake_usb_sysfs
 ):
@@ -96,6 +62,27 @@ def test_usb_replug_in_same_boot_invalidates_mapping(fake_usb_sysfs):
 
     resolved, status = state.resolve_recorded_device(info)
 
+    # Same device re-enumerated in this boot (EMI / hotplug recovery): the
+    # mapping is recovered, not invalidated.
+    assert resolved == str(fake_usb_sysfs["dev_dir"] / "ttyUSB0")
+    assert status == "connected"
+
+
+def test_usb_replug_different_device_invalidates_mapping(fake_usb_sysfs):
+    device = str(fake_usb_sysfs["dev_dir"] / "ttyUSB0")
+    usb = state.inspect_usb_device(device)
+    info = {
+        "alias": "die0",
+        "device": "/dev/ttyUSB999",
+        "boot_id": "boot-a",
+        **usb,
+    }
+    # A different adapter (different USB serial) took over the port.
+    (fake_usb_sysfs["usb_device"] / "serial").write_text("OTHER\n")
+    (fake_usb_sysfs["usb_device"] / "devnum").write_text("9\n")
+
+    resolved, status = state.resolve_recorded_device(info)
+
     assert resolved is None
     assert status == "replugged"
 
@@ -118,9 +105,8 @@ def test_usb_port_identity_normalizes_root_bus_number(fake_usb_sysfs):
     assert new["usb_instance"] != old["usb_instance"]
 
 
-def test_disconnected_usb_removes_inactive_serial_only_mapping(
-    tmp_path, fake_usb_sysfs
-):
+def test_disconnected_usb_keeps_recoverable_mapping(tmp_path, fake_usb_sysfs):
+    """Same-boot absence keeps the mapping so a resumed daemon can poll."""
     device = str(fake_usb_sysfs["dev_dir"] / "ttyUSB0")
     info = {
         "alias": "die0",
@@ -136,8 +122,12 @@ def test_disconnected_usb_removes_inactive_serial_only_mapping(
 
     reconciled = state.reconcile_info(info_path, info)
 
-    assert reconciled is None
-    assert not info_path.exists()
+    assert reconciled["device"] is None
+    assert reconciled["_device_status"] == "disconnected"
+    persisted = json.loads(info_path.read_text())
+    assert persisted["device"] is None
+    # The recoverable identity survives so the device can be found again.
+    assert persisted["usb_port"] == "pci0000:00/usb/usb-2/usb-2:1.0"
 
 
 def test_disconnected_usb_keeps_ssh_mapping(tmp_path, fake_usb_sysfs):
@@ -160,7 +150,64 @@ def test_disconnected_usb_keeps_ssh_mapping(tmp_path, fake_usb_sysfs):
     assert reconciled["ssh"] == "root@board"
     persisted = json.loads(info_path.read_text())
     assert persisted["device"] is None
-    assert "usb_port" not in persisted
+    assert persisted["usb_port"] == "pci0000:00/usb/usb-2/usb-2:1.0"
+
+
+def test_find_usb_device_uses_udev_by_path(tmp_path, fake_usb_sysfs, monkeypatch):
+    """udev /dev/serial/by-path is the preferred port->tty resolution."""
+    by_path = tmp_path / "serial-by-path"
+    by_path.mkdir()
+    node = fake_usb_sysfs["dev_dir"] / "ttyUSB0"
+    node.touch()
+    # Two udev symlinks (e.g. two XHCI views) resolving to the same node.
+    (by_path / "platform-xhci-hcd.2.auto-usb-0:1.1:1.0-port0").symlink_to(node)
+    (by_path / "platform-xhci-hcd.2.auto-usbv2-0:1.1:1.0-port0").symlink_to(node)
+    monkeypatch.setattr(state, "SERIAL_BY_PATH", by_path)
+
+    device, metadata = state.find_usb_device("pci0000:00/usb/usb-2/usb-2:1.0")
+
+    assert device == str(node)
+    assert metadata["usb_port"] == "pci0000:00/usb/usb-2/usb-2:1.0"
+
+
+def test_find_usb_device_by_path_ambiguous_rejected(tmp_path, fake_usb_sysfs, monkeypatch):
+    """Two different ttys on the same port (via by-path) are never picked."""
+    by_path = tmp_path / "serial-by-path"
+    by_path.mkdir()
+    node_a = fake_usb_sysfs["dev_dir"] / "ttyUSB0"
+    node_a.touch()
+    # Second tty under the same interface -> same physical port.
+    second_tty = fake_usb_sysfs["interface"] / "ttyUSB1"
+    second_tty.mkdir()
+    second_class = fake_usb_sysfs["class_tty"] / "ttyUSB1"
+    second_class.mkdir()
+    (second_class / "device").symlink_to(second_tty, target_is_directory=True)
+    node_b = fake_usb_sysfs["dev_dir"] / "ttyUSB1"
+    node_b.touch()
+    (by_path / "usb-0:1.1:1.0-port0").symlink_to(node_a)
+    (by_path / "usb-0:1.1:1.0-port1").symlink_to(node_b)
+    monkeypatch.setattr(state, "SERIAL_BY_PATH", by_path)
+
+    device, metadata = state.find_usb_device("pci0000:00/usb/usb-2/usb-2:1.0")
+
+    assert device is None
+    assert metadata == {}
+
+
+def test_find_usb_device_falls_back_to_sysfs_without_by_path(
+    tmp_path, fake_usb_sysfs, monkeypatch
+):
+    """No by-path entry -> the sysfs scan still resolves the port."""
+    by_path = tmp_path / "serial-by-path"
+    by_path.mkdir()
+    node = fake_usb_sysfs["dev_dir"] / "ttyUSB0"
+    node.touch()
+    # Empty by-path dir: nothing matches there.
+    monkeypatch.setattr(state, "SERIAL_BY_PATH", by_path)
+
+    device, metadata = state.find_usb_device("pci0000:00/usb/usb-2/usb-2:1.0")
+
+    assert device == str(node)
 
 
 def test_boot_id_prevents_recycled_pid_from_looking_alive(monkeypatch):
@@ -218,7 +265,7 @@ def test_serial_read_propagates_disconnect_error(tmp_config):
         daemon._serial_read()
 
 
-def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
+def test_serial_disconnect_keeps_identity_clears_device(tmp_config, monkeypatch):
     class DisconnectedSerial:
         is_open = True
 
@@ -253,7 +300,10 @@ def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
     info = json.loads(daemon._info_path().read_text())
     assert daemon.device is None
     assert info["device"] is None
-    assert "usb_port" not in info
+    # The physical port identity survives so a restarted daemon can recover;
+    # only the stale enumeration instance is dropped.
+    assert info["usb_port"] == "port"
+    assert "usb_instance" not in info
     assert broadcasts == [{"type": "serial_lost", "reason": "unplugged"}]
 
 

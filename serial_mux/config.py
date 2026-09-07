@@ -14,6 +14,13 @@ class Config:
     scrollback_lines: int = 5000
     ssh_connect_timeout: int = 3
     ssh_probe_timeout: int = 5
+    # How often (seconds) the daemon re-checks sysfs for a lost USB serial
+    # port to reappear. 0 disables automatic re-binding.
+    serial_reconnect_interval: float = 1.0
+    # How often (seconds) the smtty client retries a dropped daemon socket.
+    client_reconnect_interval: float = 1.0
+    # Maximum reconnect attempts for smtty (0 = retry forever).
+    client_reconnect_attempts: int = 0
 
     # Derived paths
     base_dir: Path = field(default_factory=lambda: Path.home() / ".serial-mux")
@@ -54,5 +61,11 @@ class Config:
                 cfg.ssh_connect_timeout = int(data["ssh_connect_timeout"])
             if "ssh_probe_timeout" in data:
                 cfg.ssh_probe_timeout = int(data["ssh_probe_timeout"])
+            if "serial_reconnect_interval" in data:
+                cfg.serial_reconnect_interval = float(data["serial_reconnect_interval"])
+            if "client_reconnect_interval" in data:
+                cfg.client_reconnect_interval = float(data["client_reconnect_interval"])
+            if "client_reconnect_attempts" in data:
+                cfg.client_reconnect_attempts = int(data["client_reconnect_attempts"])
         cfg.ensure_dirs()
         return cfg

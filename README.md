@@ -97,14 +97,18 @@ port and resumes the daemon. It can also be restored explicitly:
 serial-mux start --alias die0
 ```
 
-`usb_port` is the only persistent lookup key. Recovery scans `/sys/class/tty`
-for that physical port and derives a temporary `/dev/ttyUSBx` path only when
-opening the serial port. The previous TTY name is never matched or fed back
-into `start`; `device` is cleared from the saved record when the daemon exits.
+`usb_port` is the only persistent lookup key. The port is resolved to its
+current `/dev/ttyUSBx` node via udev's stable `/dev/serial/by-path` symlinks
+(falling back to a sysfs scan), so the previous TTY name is never matched or
+fed back into `start`; `device` is cleared from the saved record when the
+daemon exits.
 
-An unplug or re-enumeration during the same boot invalidates the old serial
-mapping. It is never silently assigned to a device plugged in later; use
-`serial-bind` on the surviving daemon or start a new mapping explicitly.
+An unplug or re-enumeration during the same boot does **not** invalidate the
+mapping — that is exactly the EMI / hotplug-recovery case. The alias stays
+bound to its physical port and is recovered when the device reappears. The
+mapping is only invalidated when a *different* device (different VID/PID, or
+USB serial when present) takes over the port. Use `serial-bind` on the
+surviving daemon or start a new mapping explicitly for a true device swap.
 
 #### Bind/unbind SSH at runtime
 
@@ -268,6 +272,56 @@ Non-interactive mode sends each command exactly once on both serial and SSH tran
 | 1    | Connection error |
 | 2    | Timeout waiting for `--wait` pattern |
 
+## Automatic Reconnection
+
+`serial-mux` is designed to survive the transient dropouts that happen during
+hardware bring-up — board resets, USB-serial re-enumeration, and daemon
+restarts — without the operator restarting anything by hand.
+
+### Serial device loss and recovery
+
+When the daemon's serial transport disappears (unplug, power glitch, or a
+re-enumeration that moves the device from `/dev/ttyUSB1` to `/dev/ttyUSB0`),
+the daemon does **not** exit. It closes the dead port, remembers the device
+identity, and keeps polling sysfs until the device reappears. Connected clients
+see a status line for each transition:
+
+```
+--- serial device lost: USB serial port was unplugged or re-enumerated — waiting to reconnect ---
+--- serial restored: /dev/ttyUSB0 ---
+```
+
+Recovery matches the original **device**, not just a port or a transient
+`/dev/ttyUSB*` name. The identity is the physical USB port plus VID/PID, and the
+USB serial number when the adapter exposes one. The port is resolved through
+udev's `/dev/serial/by-path` symlinks, which stay stable across re-enumeration
+and node-name changes.
+
+Multi-board note: most FT232/CH340 adapters share VID/PID and expose no unique
+USB serial, so the physical port is the only discriminator. Each daemon polls
+its own recorded port, so when several boards drop and come back in a different
+order (kernel may hand out node names like `ttyUSB0`/`ttyUSB1` in a different
+arrangement), every daemon still re-binds its own physical device; the tty
+names in `serial-mux list` may be swapped but each alias keeps talking to the
+right board. If a *different* device appears on a port (different VID/PID or
+serial), the daemon keeps waiting instead of silently binding it. For identical
+adapters physically swapped between ports, no software can tell — re-run
+`serial-bind` to re-map explicitly.
+
+An explicit `serial-mux serial-unbind <alias>` still disables the port
+completely — auto-rebind only applies after an *unexpected* loss. Set
+`serial_reconnect_interval: 0` to turn auto-rebind off entirely (it stops
+polling rather than busy-looping).
+
+### Client reconnection to the daemon
+
+If the daemon process itself goes away (crash, reboot, or `kill`), the `smtty`
+interactive client no longer exits. It retries the connection every
+`client_reconnect_interval` seconds, re-resuming a dead daemon from its saved
+metadata when possible, and replays scrollback history before resuming live I/O.
+Press `Ctrl+]` at any time to detach and stop retrying. `client_reconnect_attempts`
+bounds the retries (0 = keep trying forever).
+
 ## Identity Tagging
 
 All data (input and device output) is logged with timestamps. There is no source distinction — both input echo and device responses are recorded in the same format:
@@ -300,6 +354,16 @@ ssh_connect_timeout: 3
 
 # How long to wait for the SSH process — if still alive after this, connection is assumed OK (seconds)
 ssh_probe_timeout: 5
+
+# How often (seconds) the daemon re-checks sysfs for a lost USB serial port
+# to reappear. 0 disables automatic re-binding.
+serial_reconnect_interval: 1.0
+
+# How often (seconds) the smtty client retries a dropped daemon socket.
+client_reconnect_interval: 1.0
+
+# Maximum reconnect attempts for smtty (0 = retry forever).
+client_reconnect_attempts: 0
 ```
 
 ## File Layout

@@ -13,6 +13,9 @@ BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 SYS_CLASS_TTY = Path("/sys/class/tty")
 SYS_DEVICES = Path("/sys/devices")
 DEV_DIR = Path("/dev")
+# udev-created stable symlinks keyed by the physical USB port path, e.g.
+# /dev/serial/by-path/platform-xhci-hcd.2.auto-usb-0:1.1:1.0-port0 -> ../../ttyUSB0
+SERIAL_BY_PATH = Path("/dev/serial/by-path")
 
 
 def get_boot_id() -> Optional[str]:
@@ -55,6 +58,15 @@ def _read_sysfs_number(path: Path) -> Optional[str]:
         return str(int(path.read_text().strip()))
     except (OSError, ValueError):
         return None
+
+
+def _read_sysfs_str(path: Path) -> Optional[str]:
+    """Read a sysfs text attribute, returning None when absent or empty."""
+    try:
+        value = path.read_text().strip()
+    except (OSError, ValueError):
+        return None
+    return value or None
 
 
 def inspect_usb_device(device: Optional[str]) -> dict[str, str]:
@@ -142,34 +154,129 @@ def inspect_usb_tty(tty_name: str) -> dict[str, str]:
     if busnum is None or devnum is None:
         return {}
 
-    return {
+    result = {
         "usb_port": usb_port,
         "usb_instance": f"{busnum}:{devnum}",
     }
+    # Device identity fields used to distinguish two adapters that may share a
+    # physical port over time. ``serial`` is often absent (e.g. an FT232 with an
+    # unprogrammed EEPROM); such devices can only be matched best-effort.
+    vid = _read_sysfs_str(usb_device / "idVendor")
+    pid = _read_sysfs_str(usb_device / "idProduct")
+    serial_no = _read_sysfs_str(usb_device / "serial")
+    if vid:
+        result["usb_vid"] = vid
+    if pid:
+        result["usb_pid"] = pid
+    if serial_no:
+        result["usb_serial"] = serial_no
+    return result
+
+
+def _sysfs_tty_names() -> list[str]:
+    """Return all TTY class names from sysfs, sorted."""
+    try:
+        return sorted(
+            path.name for path in SYS_CLASS_TTY.iterdir()
+        )
+    except OSError:
+        return []
+
+
+def _scan_serial_by_path() -> list[str]:
+    """Return the TTY names reachable via udev ``/dev/serial/by-path``.
+
+    The by-path symlinks are keyed by the physical USB port path (a stable
+    topology identity), so they are the canonical way to map a physical port to
+    its current device node. Multiple symlinks may resolve to the same node
+    (e.g. two XHCI views on the same controller), so results are deduplicated.
+    """
+    if not SERIAL_BY_PATH.is_dir():
+        return []
+    names = set()
+    try:
+        for entry in SERIAL_BY_PATH.iterdir():
+            if not entry.is_symlink():
+                continue
+            try:
+                target = entry.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if target.parent == DEV_DIR and target.name:
+                names.add(target.name)
+    except OSError:
+        return []
+    return sorted(names)
+
+
+def _match_tty_port(names: list[str], usb_port: str) -> list[tuple[str, dict]]:
+    """Return (tty_name, metadata) pairs whose physical port matches."""
+    matches = []
+    for name in names:
+        metadata = inspect_usb_tty(name)
+        if metadata.get("usb_port") == usb_port:
+            matches.append((name, metadata))
+    return matches
 
 
 def find_usb_device(usb_port: str) -> tuple[Optional[str], dict[str, str]]:
-    """Find the current ``/dev/tty*`` node attached to a saved USB port."""
-    try:
-        tty_entries = sorted(
-            SYS_CLASS_TTY.iterdir(), key=lambda path: path.name
-        )
-    except OSError:
-        return None, {}
+    """Find the current ``/dev/tty*`` node attached to a saved USB port.
 
-    for entry in tty_entries:
-        metadata = inspect_usb_tty(entry.name)
-        if metadata.get("usb_port") == usb_port:
-            return str(DEV_DIR / entry.name), metadata
+    Prefers the udev ``/dev/serial/by-path`` view (stable physical-port key);
+    falls back to a full sysfs scan when the port has no by-path entry.
+    Returns ``(None, {})`` when the port is absent or the match is ambiguous,
+    so callers never silently pick an arbitrary device.
+    """
+    by_path_names = _scan_serial_by_path()
+    names = by_path_names or _sysfs_tty_names()
+    matches = _match_tty_port(names, usb_port)
+    if len(matches) == 1:
+        name, metadata = matches[0]
+        return str(DEV_DIR / name), metadata
+    if len(matches) > 1:
+        return None, {}
+    # No by-path entry for this port — retry against the full sysfs view.
+    if by_path_names:
+        matches = _match_tty_port(_sysfs_tty_names(), usb_port)
+        if len(matches) == 1:
+            name, metadata = matches[0]
+            return str(DEV_DIR / name), metadata
     return None, {}
+
+
+def usb_identity_matches(saved: dict, fresh: dict) -> bool:
+    """Best-effort check that a fresh sysfs snapshot is the same device.
+
+    Enforces every recorded identity field (VID/PID/USB serial). Adapters that
+    share VID/PID and expose no unique serial (e.g. most FT232/CH340) can only
+    be distinguished by their physical port, so when no identity field was
+    recorded this falls back to the enumeration instance and returns True only
+    if nothing observable changed.
+    """
+    enforced = False
+    for field in ("usb_vid", "usb_pid", "usb_serial"):
+        expected = saved.get(field)
+        if expected:
+            enforced = True
+            if fresh.get(field) != expected:
+                return False
+    if enforced:
+        return True
+    saved_instance = saved.get("usb_instance")
+    fresh_instance = fresh.get("usb_instance")
+    if saved_instance and fresh_instance:
+        return saved_instance == fresh_instance
+    return True
 
 
 def resolve_recorded_device(info: dict) -> tuple[Optional[str], str]:
     """Resolve a saved USB port to its current TTY and classify its state.
 
     The returned status is one of ``plain``, ``connected``, ``rebooted``,
-    ``unavailable``, ``disconnected``, or ``replugged``. The last two mean a
-    hotplug event happened during the same boot and the mapping must be
+    ``unavailable``, ``disconnected``, or ``replugged``. A same-boot
+    re-enumeration (EMI / hotplug) of the *same* device is reported as
+    ``connected`` so the mapping is recovered; only a genuinely different
+    device on the port (identity mismatch) is ``replugged`` and must be
     invalidated.
     """
     usb_port = info.get("usb_port")
@@ -193,6 +300,11 @@ def resolve_recorded_device(info: dict) -> tuple[Optional[str], str]:
     saved_instance = info.get("usb_instance")
     current_instance = current_usb.get("usb_instance")
     if same_boot and saved_instance and current_instance != saved_instance:
+        # The device re-enumerated in this boot. That is the EMI recovery case:
+        # recover when the identity still matches, invalidate only when a
+        # different device took over the port.
+        if usb_identity_matches(info, current_usb):
+            return current_device, "connected"
         return None, "replugged"
     return current_device, "connected"
 
@@ -275,10 +387,18 @@ def reconcile_info(path: Path, info: dict) -> Optional[dict]:
         result["clients_count"] = 0
 
     device, status = resolve_recorded_device(result)
-    if status in {"disconnected", "replugged"}:
+    if status == "replugged":
+        # A different device took over the physical port — invalidate.
         result = clear_serial_mapping(path, result)
         if result is not None:
             result["_device_status"] = status
+        return result
+
+    if status == "disconnected":
+        # Same-boot absence: keep the recoverable mapping so a resumed daemon
+        # can poll for the device to reappear (EMI / hotplug recovery).
+        result["device"] = None
+        result["_device_status"] = status
         return result
 
     if status == "unavailable":

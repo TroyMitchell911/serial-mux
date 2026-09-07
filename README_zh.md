@@ -252,9 +252,37 @@ alias 映射存储在 `~/.serial-mux/run/<alias>.json`：
 ```
 
 上例是 daemon 未运行时的持久记录。`usb_port` 是恢复主键；`device` 只在 daemon
-运行期间表示本次反查得到的当前设备节点，不用于跨重启匹配。
+运行期间表示本次反查得到的当前设备节点，不用于跨重启匹配。端口通过 udev
+的 `/dev/serial/by-path` 稳定符号链接解析为当前 tty 节点。
+
+同一次开机中的 USB 拔出或重新枚举**不会**使映射失效——这正是 EMI/热插拔
+恢复场景。alias 始终绑定其物理端口，设备重新出现即自动恢复；只有当一只
+*不同* 的设备（VID/PID 或 serial 不同）占用了该端口时才清除映射。
 
 客户端使用 alias 连接时优先查找映射，未匹配时当设备路径处理。
+
+## 自动重连
+
+serial-mux 面向硬件 bring-up 中常见的瞬断场景设计：开发板复位、USB 串口重新枚举、daemon 重启，都不需要人工重启任何东西。
+
+### 串口丢失与恢复
+
+当 daemon 的串口传输消失（拔插、供电抖动、设备从 `/dev/ttyUSB1` 重新枚举为 `/dev/ttyUSB0`）时，daemon **不会退出**。它会关闭失效端口、记住设备身份，并轮询 sysfs 直到设备重新出现，然后自动重新打开并恢复扇出。连接的客户端会看到每次切换的状态行：
+
+```
+--- serial device lost: USB serial port was unplugged or re-enumerated — waiting to reconnect ---
+--- serial restored: /dev/ttyUSB0 ---
+```
+
+恢复匹配的是原始**设备**，而不是某个端口或转瞬即逝的 `/dev/ttyUSB*` 名字。设备身份由物理 USB 端口 + VID/PID 组成，并在适配器提供 USB serial 时一并校验。端口通过 udev 的 `/dev/serial/by-path` 稳定符号链接解析（回退到 sysfs 扫描），跨重新枚举和设备名变化保持不变。
+
+多板场景：绝大多数 FT232/CH340 的 VID/PID 相同且没有唯一 USB serial，物理端口是唯一区分手段。每个 daemon 只轮询自己记录的端口；当多块板子因 EMI 依次断开、又按不同顺序恢复（内核可能把 `ttyUSB0`/`ttyUSB1` 等节点名重新分配），每个 daemon 仍会重绑自己的物理设备——`serial-mux list` 里的 tty 名字可能对调，但每个 alias 依旧连着自己那块板。如果同一端口上出现了另一只设备（VID/PID 或 serial 不同），daemon 会继续等待而不是静默绑定错误设备。真正把两只一模一样的适配器对调端口是软件无法识别的——请显式 `serial-bind` 重新映射。
+
+显式执行 `serial-mux serial-unbind <alias>` 仍然会彻底停用该端口——自动重绑只针对**意外**丢失。设置 `serial_reconnect_interval: 0` 可完全关闭自动重绑（停止轮询，而不是空转）。
+
+### 客户端重连 daemon
+
+如果 daemon 进程本身消失（崩溃、重启或 `kill`），交互式客户端 `smtty` 不再退出。它会每 `client_reconnect_interval` 秒重试连接，尽可能从保存的元数据自动恢复已死的 daemon，并在恢复实时 I/O 前回放 scrollback 历史。任何时候按 `Ctrl+]` 都可以 detach 并停止重试。`client_reconnect_attempts` 限制重试次数（0 = 无限重试）。
 
 ## 配置文件
 
@@ -266,6 +294,9 @@ default_baud: 115200        # 默认波特率
 scrollback_lines: 5000      # attach 时回放的历史行数
 ssh_connect_timeout: 3      # SSH ConnectTimeout（秒）
 ssh_probe_timeout: 5        # SSH 探测等待时间（秒），超时判定连接成功
+serial_reconnect_interval: 1.0  # daemon 轮询 sysfs 等待丢失的 USB 串口重新出现的间隔（秒），0 禁用自动重绑
+client_reconnect_interval: 1.0  # smtty 客户端重连 daemon socket 的间隔（秒）
+client_reconnect_attempts: 0    # smtty 最大重连次数（0 = 无限重试）
 ```
 
 所有配置项都有合理默认值，配置文件可选。daemon 启动时读取配置。
