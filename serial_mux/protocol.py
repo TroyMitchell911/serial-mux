@@ -5,7 +5,7 @@ Message format: 4-byte big-endian length prefix + JSON payload.
 Message types:
 
 Client -> Daemon:
-  {"type": "hello"}
+  {"type": "hello", "interactive": true|false}
   {"type": "input", "data": "<base64 encoded bytes>"}
   {"type": "history_request"}
   {"type": "set_baud", "baud": <int>}
@@ -15,7 +15,8 @@ Client -> Daemon:
   {"type": "serial_unbind"}
 
 Daemon -> Client:
-  {"type": "hello_ack", "alias": "...", "device": "...", "baud": ..., "transport": "ssh"|"serial"}
+  {"type": "hello_ack", "alias": "...", "device": "...", "baud": ...,
+   "transport": "ssh"|"serial", "terminal_owner": true|false}
   {"type": "output", "data": "<base64 encoded bytes>"}
   {"type": "history", "lines": ["...", ...]}
   {"type": "error", "message": "..."}
@@ -23,6 +24,7 @@ Daemon -> Client:
   {"type": "ssh_bind_ack", "target": "...", "ok": true/false, "message": "..."}
   {"type": "serial_bind_ack", "device": "...", "ok": true/false, "message": "..."}
   {"type": "transport_changed", "transport": "ssh"|"serial"}
+  {"type": "terminal_owner", "active": true|false}
 """
 
 import base64

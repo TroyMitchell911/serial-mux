@@ -62,6 +62,8 @@ class SerialDaemon:
         self.config = config
         self.ser: Optional[serial.Serial] = None
         self.clients: list[asyncio.StreamWriter] = []
+        self._interactive_clients: list[asyncio.StreamWriter] = []
+        self._terminal_owner: Optional[asyncio.StreamWriter] = None
         self.log_lines: list[str] = []  # ring buffer for scrollback
         self.log_file = None
         self.log_date: Optional[str] = None
@@ -271,12 +273,44 @@ class SerialDaemon:
             except Exception:
                 dead.append(writer)
         for w in dead:
-            self._remove_client(w)
+            await self._remove_client(w)
 
-    def _remove_client(self, writer: asyncio.StreamWriter):
+    async def _claim_terminal(self, writer: asyncio.StreamWriter):
+        """Make the newest interactive client answer terminal queries."""
+        previous = self._terminal_owner
+        self._terminal_owner = writer
+        if previous is None or previous is writer:
+            return
+        if previous not in self.clients:
+            return
+        try:
+            await async_write_msg(
+                previous,
+                {"type": "terminal_owner", "active": False},
+            )
+        except Exception:
+            pass
+
+    async def _remove_client(self, writer: asyncio.StreamWriter):
         """Remove a disconnected client."""
         if writer in self.clients:
             self.clients.remove(writer)
+        if writer in self._interactive_clients:
+            self._interactive_clients.remove(writer)
+
+        if writer is self._terminal_owner:
+            if self._interactive_clients:
+                self._terminal_owner = self._interactive_clients[-1]
+            else:
+                self._terminal_owner = None
+            if self._terminal_owner is not None:
+                try:
+                    await async_write_msg(
+                        self._terminal_owner,
+                        {"type": "terminal_owner", "active": True},
+                    )
+                except Exception:
+                    pass
         try:
             writer.close()
         except Exception:
@@ -295,6 +329,10 @@ class SerialDaemon:
                 return
 
             self.clients.append(writer)
+            interactive = bool(msg.get("interactive", False))
+            if interactive:
+                self._interactive_clients.append(writer)
+                await self._claim_terminal(writer)
             logger.info(f"Client connected. Active: {len(self.clients)}")
             self._write_info()
 
@@ -305,6 +343,7 @@ class SerialDaemon:
                 "device": self.device,
                 "baud": self.baud,
                 "transport": "ssh" if self._ssh_is_connected() else "serial",
+                "terminal_owner": writer is self._terminal_owner,
             })
 
             # Send history
@@ -341,7 +380,7 @@ class SerialDaemon:
         except Exception as e:
             logger.error(f"Client handler error: {e}")
         finally:
-            self._remove_client(writer)
+            await self._remove_client(writer)
 
     async def _handle_client_msg(self, msg: dict, writer: asyncio.StreamWriter):
         """Process a message from a client."""

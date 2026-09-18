@@ -118,7 +118,11 @@ def _auto_resume_daemon(config: Config, alias: str) -> bool:
     return False
 
 
-def connect(config: Config, alias: str) -> socket.socket:
+def connect(
+    config: Config,
+    alias: str,
+    interactive: bool = False,
+) -> tuple[socket.socket, str]:
     """Connect to daemon and perform handshake. Auto-resumes dead daemons."""
     sock_path = resolve_socket(config, alias)
 
@@ -161,7 +165,10 @@ def connect(config: Config, alias: str) -> socket.socket:
         sock.connect(sock_path)
 
     # Send hello
-    sync_write_msg(sock, {"type": "hello"})
+    sync_write_msg(
+        sock,
+        {"type": "hello", "interactive": interactive},
+    )
 
     # Read hello_ack
     msg = sync_read_msg(sock)
@@ -176,14 +183,106 @@ def connect(config: Config, alias: str) -> socket.socket:
 
 
 _TS_RE = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
-_ANSI_RE = re.compile(
-    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"   # OSC: \x1b]...(BEL or ST)
-    r"|\x1bP[^\x1b]*\x1b\\"                 # DCS: \x1bP...\x1b\\
-    r"|\x1b\[[!-?]*[0-9;]*[ -/]*[A-la-ln-~]"   # CSI except SGR (SGR ends with 'm')
-    r"|\x1b\([0-9;]*[A-Za-z@-~]"            # ESC ( charset select
-    r"|\x1b[^\[\(\]P]"                       # ESC + single char
-    r"|[\x00-\x08\x0e-\x1a\x1c-\x1f]"                # C0 control chars except \t \n \r \x1b(ESC)
+_SGR_RE = re.compile(r"\x1b\[[0-?]*[ -/]*m")
+
+_TERMINAL_NORMALIZE = (
+    b"\x1b[?1049l"  # Leave an alternate screen opened by the remote TUI.
+    b"\x0f"  # Select G0; SO may have selected the line-drawing G1 set.
+    b"\x1b(B"  # Designate ASCII for G0.
+    b"\x1b)B"  # Designate ASCII for G1.
+    b"\x1b[0m"  # Reset colors and attributes.
+    b"\x1b[?1l"  # Restore normal cursor keys.
+    b"\x1b>"  # Restore the numeric keypad.
+    b"\x1b[?6l"  # Disable origin mode before resetting the margins.
+    b"\x1b[r"  # Restore the full-screen scrolling region.
+    b"\x1b[?7h"  # Restore autowrap.
+    b"\x1b[?25h"  # Show the cursor.
 )
+_TERMINAL_CLEANUP = _TERMINAL_NORMALIZE + b"\r\n"
+
+
+class _TerminalQueryFilter:
+    """Remove terminal queries from an observer's output stream.
+
+    A terminal query sent to every attached client would produce one response
+    per terminal.  The remote TUI can then calculate its geometry from the
+    wrong response.  Only the active terminal owner receives these queries.
+    """
+
+    _WINDOW_REPORTS = {
+        11,
+        13,
+        14,
+        15,
+        16,
+        18,
+        19,
+        20,
+        21,
+    }
+
+    def __init__(self):
+        self._pending = bytearray()
+
+    @staticmethod
+    def _is_query(sequence: bytes) -> bool:
+        payload = sequence[2:-1]
+        final = sequence[-1:]
+
+        if final in (b"c", b"n", b"x"):
+            return True
+        if final == b"p" and b"$" in payload:
+            return True
+        if final != b"t":
+            return False
+
+        first_param = payload.split(b";", 1)[0].lstrip(b"?>")
+        try:
+            operation = int(first_param)
+        except ValueError:
+            return False
+        return operation in _TerminalQueryFilter._WINDOW_REPORTS
+
+    def reset(self):
+        self._pending.clear()
+
+    def feed(self, data: bytes) -> bytes:
+        """Return data with complete CSI terminal queries removed."""
+        source = bytes(self._pending) + data
+        self._pending.clear()
+        output = bytearray()
+        index = 0
+
+        while index < len(source):
+            escape = source.find(b"\x1b", index)
+            if escape < 0:
+                output.extend(source[index:])
+                break
+
+            output.extend(source[index:escape])
+            if escape + 1 >= len(source):
+                self._pending.extend(source[escape:])
+                break
+            if source[escape + 1] != ord("["):
+                output.append(source[escape])
+                index = escape + 1
+                continue
+
+            final = escape + 2
+            while final < len(source):
+                if 0x40 <= source[final] <= 0x7E:
+                    break
+                final += 1
+            if final >= len(source):
+                self._pending.extend(source[escape:])
+                break
+
+            sequence = source[escape:final + 1]
+            if not self._is_query(sequence):
+                output.extend(sequence)
+            index = final + 1
+
+        return bytes(output)
 
 
 def _strip_timestamp(line: str) -> str:
@@ -192,23 +291,124 @@ def _strip_timestamp(line: str) -> str:
 
 
 def _sanitize_history_line(line: str) -> str:
-    """Strip ANSI escapes, backspaces, and stray \\r from a history line."""
-    line = _ANSI_RE.sub("", line)
-    line = line.replace("\r", "")
-    return line
+    """Keep printable history and SGR while dropping terminal state changes."""
+    output = []
+    index = 0
+
+    while index < len(line):
+        char = line[index]
+        code = ord(char)
+
+        if char == "\x1b":
+            index += 1
+            if index >= len(line):
+                break
+
+            introducer = line[index]
+            if introducer == "[":
+                final = index + 1
+                while final < len(line):
+                    if 0x40 <= ord(line[final]) <= 0x7E:
+                        break
+                    final += 1
+                if final >= len(line):
+                    break
+                if line[final] == "m":
+                    output.append(line[index - 1:final + 1])
+                index = final + 1
+                continue
+
+            if introducer in "]PX^_":
+                index += 1
+                while index < len(line):
+                    if line[index] == "\x07":
+                        index += 1
+                        break
+                    if (
+                        line[index] == "\x1b"
+                        and index + 1 < len(line)
+                        and line[index + 1] == "\\"
+                    ):
+                        index += 2
+                        break
+                    index += 1
+                continue
+
+            while index < len(line):
+                code = ord(line[index])
+                if not 0x20 <= code <= 0x2F:
+                    break
+                index += 1
+            if index < len(line):
+                code = ord(line[index])
+                if 0x30 <= code <= 0x7E:
+                    index += 1
+            continue
+
+        if char == "\r" or code == 0x7F:
+            index += 1
+            continue
+        if code < 0x20 and char != "\t":
+            index += 1
+            continue
+
+        output.append(char)
+        index += 1
+
+    return "".join(output)
+
+
+def _write_terminal_sequence(fd: int, sequence: bytes):
+    """Write a complete control sequence to a terminal when one is present."""
+    if not os.isatty(fd):
+        return
+
+    remaining = memoryview(sequence)
+    try:
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                break
+            remaining = remaining[written:]
+    except OSError:
+        pass
+
+
+def _normalize_local_terminal(output_fd: int):
+    """Put the terminal emulator in a neutral state before rendering."""
+    _write_terminal_sequence(output_fd, _TERMINAL_NORMALIZE)
+
+
+def _restore_local_terminal(
+    input_fd: int,
+    output_fd: int,
+    settings,
+):
+    """Restore emulator state and the local tty line discipline."""
+    try:
+        _write_terminal_sequence(output_fd, _TERMINAL_CLEANUP)
+    finally:
+        termios.tcsetattr(input_fd, termios.TCSADRAIN, settings)
 
 
 def interactive_mode(config: Config, alias: str, timestamps: bool = False):
     """Interactive attach mode — like tio/minicom but multiplexed."""
-    sock, transport = connect(config, alias)
+    sock, transport = connect(config, alias, interactive=True)
 
     # Read history (will be replayed after entering raw mode)
     history_msg = sync_read_msg(sock)
 
     # Save terminal state and switch to raw mode
-    old_settings = termios.tcgetattr(sys.stdin.fileno())
+    input_fd = sys.stdin.fileno()
+    output_fd = sys.stdout.fileno()
+    old_settings = termios.tcgetattr(input_fd)
+    exit_message = None
+    terminal_owner = True
+    query_filter = _TerminalQueryFilter()
+
     try:
-        tty.setraw(sys.stdin.fileno())
+        tty.setraw(input_fd)
+        _normalize_local_terminal(output_fd)
         sock.setblocking(False)
 
         # Replay history in raw mode so terminal handles it cleanly
@@ -217,21 +417,32 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
             # Sanitize and deduplicate history lines
             cleaned = []
             seen_window = deque(maxlen=5)
-            _sgr_re = re.compile(r"\x1b\[[0-9;]*m")
             for line in raw_lines:
                 text = line if timestamps else _strip_timestamp(line)
                 text = _sanitize_history_line(text)
                 # Compare by plain text (no SGR, no trailing whitespace)
-                plain = _sgr_re.sub("", text).strip()
+                plain = _SGR_RE.sub("", text).strip()
                 if not plain or plain in seen_window:
                     continue
                 seen_window.append(plain)
                 cleaned.append(text)
             for text in cleaned:
-                os.write(sys.stdout.fileno(), (text + "\r\n").encode("utf-8", errors="replace"))
+                data = (text + "\r\n").encode(
+                    "utf-8",
+                    errors="replace",
+                )
+                os.write(output_fd, data)
 
-        print(f"\r\n--- serial-mux: attached to {alias} [{transport}] (Ctrl+] to detach) ---\r\n",
-              end="", flush=True)
+        # History may contain unterminated SGR.  Do not let it affect the
+        # attachment banner or the live terminal stream.
+        _normalize_local_terminal(output_fd)
+
+        print(
+            f"\r\n--- serial-mux: attached to {alias} "
+            f"[{transport}] (Ctrl+] to detach) ---\r\n",
+            end="",
+            flush=True,
+        )
 
         last_output_was_newline = True
 
@@ -240,27 +451,29 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
 
             if sys.stdin in readable:
                 try:
-                    ch = os.read(sys.stdin.fileno(), 1)
+                    ch = os.read(input_fd, 1)
                 except OSError:
+                    exit_message = "detached"
                     break
                 if not ch:
+                    exit_message = "detached"
                     break
                 # Ctrl+] to detach
                 if ch == b"\x1d":
-                    print("\r\n--- detached ---\r\n", end="", flush=True)
+                    exit_message = "detached"
                     break
 
                 # If timestamps enabled, handle input newline
                 if timestamps and ch in (b"\r", b"\n"):
                     ts = datetime.now().strftime("%H:%M:%S")
                     # Use \r\n to ensure proper cursor movement in raw mode
-                    os.write(sys.stdout.fileno(), f" [{ts}]\r\n".encode("utf-8"))
+                    os.write(output_fd, f" [{ts}]\r\n".encode("utf-8"))
 
                 # Send to daemon
                 try:
                     sync_write_msg(sock, {"type": "input", "data": b64(ch)})
                 except (BrokenPipeError, ConnectionResetError):
-                    print("\r\n--- connection lost ---\r\n", end="", flush=True)
+                    exit_message = "connection lost"
                     break
 
             if sock in readable:
@@ -273,23 +486,33 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
                     msg = sync_read_msg(sock)
                     sock.setblocking(False)
                     if msg is None:
-                        print("\r\n--- daemon disconnected ---\r\n", end="", flush=True)
+                        exit_message = "daemon disconnected"
                         break
 
-                    if msg["type"] == "output":
+                    message_type = msg.get("type")
+                    if message_type == "terminal_owner":
+                        terminal_owner = bool(msg.get("active"))
+                        query_filter.reset()
+                    elif message_type == "output":
                         data = unb64(msg["data"])
+                        if not terminal_owner:
+                            data = query_filter.feed(data)
+                        if not data:
+                            continue
                         if not timestamps:
-                            os.write(sys.stdout.fileno(), data)
+                            os.write(output_fd, data)
                         else:
-                            # Character-by-character processing for timestamp insertion
+                            # Insert timestamps at the beginning of each line.
                             for b in data:
                                 if last_output_was_newline:
-                                    ts = datetime.now().strftime("[%H:%M:%S] ")
-                                    os.write(sys.stdout.fileno(), ts.encode("utf-8"))
+                                    ts = datetime.now().strftime(
+                                        "[%H:%M:%S] "
+                                    )
+                                    os.write(output_fd, ts.encode("utf-8"))
                                     last_output_was_newline = False
-                                
+
                                 char_bytes = bytes([b])
-                                os.write(sys.stdout.fileno(), char_bytes)
+                                os.write(output_fd, char_bytes)
                                 if char_bytes == b"\n":
                                     last_output_was_newline = True
 
@@ -297,14 +520,19 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
                     # Timeout reading a complete message — switch back to non-blocking
                     sock.setblocking(False)
                 except (ConnectionResetError, BrokenPipeError):
-                    print("\r\n--- connection lost ---\r\n", end="", flush=True)
+                    exit_message = "connection lost"
                     break
                 except Exception:
                     sock.setblocking(False)
 
     finally:
-        termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old_settings)
-        sock.close()
+        try:
+            _restore_local_terminal(input_fd, output_fd, old_settings)
+        finally:
+            sock.close()
+
+    if exit_message:
+        print(f"--- {exit_message} ---\r\n", end="", flush=True)
 
 
 def noninteractive_mode(config: Config, alias: str,

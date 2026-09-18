@@ -118,7 +118,7 @@ asyncio.run(daemon.run())
         proc.kill()
 
 
-def connect_to_daemon(config, alias):
+def connect_to_daemon(config, alias, interactive=False):
     """Helper: connect to daemon socket, do handshake, return (sock, transport, history)."""
     sock_path = config.sock_dir / f"{alias}.sock"
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -126,7 +126,10 @@ def connect_to_daemon(config, alias):
     sock.settimeout(5.0)
 
     # Hello handshake
-    sync_write_msg(sock, {"type": "hello"})
+    sync_write_msg(
+        sock,
+        {"type": "hello", "interactive": interactive},
+    )
     ack = sync_read_msg(sock)
     assert ack["type"] == "hello_ack"
     transport = ack.get("transport", "serial")

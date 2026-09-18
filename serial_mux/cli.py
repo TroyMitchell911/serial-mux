@@ -300,7 +300,7 @@ def cmd_set_baud(args):
         sock.settimeout(5.0)
 
         # Handshake
-        sync_write_msg(sock, {"type": "hello"})
+        sync_write_msg(sock, {"type": "hello", "interactive": False})
         resp = sync_read_msg(sock)
         if not resp or resp.get("type") != "hello_ack":
             print(f"Error: Unexpected response from daemon")
@@ -353,7 +353,7 @@ def _send_daemon_msg(alias: str, msg: dict, expect_type: str = None) -> dict:
     try:
         sock.connect(sock_path)
         sock.settimeout(15.0)
-        sync_write_msg(sock, {"type": "hello"})
+        sync_write_msg(sock, {"type": "hello", "interactive": False})
         resp = sync_read_msg(sock)
         if not resp or resp.get("type") != "hello_ack":
             print(f"Error: Unexpected response from daemon")

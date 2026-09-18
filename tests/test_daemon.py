@@ -120,6 +120,38 @@ class TestDaemonLifecycle:
         sock1.close()
         sock2.close()
 
+    def test_latest_interactive_client_owns_terminal_queries(
+        self,
+        daemon_foreground,
+    ):
+        proc, alias, config, pty_peer = daemon_foreground
+
+        sock1, _, _ = connect_to_daemon(
+            config,
+            alias,
+            interactive=True,
+        )
+        sock1.settimeout(3.0)
+        sock2, _, _ = connect_to_daemon(
+            config,
+            alias,
+            interactive=True,
+        )
+
+        demoted = sync_read_msg(sock1)
+        assert demoted == {
+            "type": "terminal_owner",
+            "active": False,
+        }
+
+        sock2.close()
+        promoted = sync_read_msg(sock1)
+        assert promoted == {
+            "type": "terminal_owner",
+            "active": True,
+        }
+        sock1.close()
+
     def test_client_count_tracked(self, daemon_foreground):
         proc, alias, config, pty_peer = daemon_foreground
 
