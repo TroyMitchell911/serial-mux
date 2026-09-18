@@ -197,8 +197,11 @@ _TERMINAL_NORMALIZE = (
     b"\x1b[r"  # Restore the full-screen scrolling region.
     b"\x1b[?7h"  # Restore autowrap.
     b"\x1b[?25h"  # Show the cursor.
+    # DECOM and DECSTBM home the cursor. Start a fresh line at the bottom
+    # afterward so the next output cannot overwrite existing screen text.
+    # CUP clamps this row to the screen height without a terminal query.
+    b"\x1b[9999;1H\r\n"
 )
-_TERMINAL_CLEANUP = _TERMINAL_NORMALIZE + b"\r\n"
 
 
 class _TerminalQueryFilter:
@@ -386,7 +389,7 @@ def _restore_local_terminal(
 ):
     """Restore emulator state and the local tty line discipline."""
     try:
-        _write_terminal_sequence(output_fd, _TERMINAL_CLEANUP)
+        _normalize_local_terminal(output_fd)
     finally:
         termios.tcsetattr(input_fd, termios.TCSADRAIN, settings)
 
@@ -433,9 +436,10 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
                 )
                 os.write(output_fd, data)
 
-        # History may contain unterminated SGR.  Do not let it affect the
-        # attachment banner or the live terminal stream.
-        _normalize_local_terminal(output_fd)
+        # Sanitized history can only change SGR. Reset attributes here, not
+        # margins/origin mode: those controls home the cursor and would make
+        # the banner and live output overwrite the history just displayed.
+        _write_terminal_sequence(output_fd, b"\x1b[0m")
 
         print(
             f"\r\n--- serial-mux: attached to {alias} "

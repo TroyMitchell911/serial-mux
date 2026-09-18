@@ -79,7 +79,7 @@ def test_restore_local_terminal_resets_pty_state():
 
         readable, _, _ = select.select([master_fd], [], [], 1.0)
         assert readable == [master_fd]
-        assert os.read(master_fd, 4096) == client._TERMINAL_CLEANUP
+        assert os.read(master_fd, 4096) == client._TERMINAL_NORMALIZE
         assert termios.tcgetattr(slave_fd) == saved_settings
     finally:
         os.close(master_fd)
@@ -132,7 +132,7 @@ def test_interactive_mode_claims_terminal_and_restores_on_detach(
 
     assert connections == [("com260", True)]
     assert terminal_writes[0] == client._TERMINAL_NORMALIZE
-    assert terminal_writes[-1] == client._TERMINAL_CLEANUP
+    assert terminal_writes[-1] == client._TERMINAL_NORMALIZE
     assert restored == [(10, termios.TCSADRAIN, "saved")]
     assert sock.closed is True
     assert "--- detached ---" in "".join(fake_stdout.output)
