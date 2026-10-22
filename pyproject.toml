@@ -25,3 +25,8 @@ test = [
 
 [tool.setuptools.packages.find]
 include = ["serial_mux*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "linux_only: requires POSIX serial, terminal, signal, or Unix socket support",
+]

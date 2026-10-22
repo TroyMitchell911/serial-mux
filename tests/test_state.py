@@ -14,6 +14,12 @@ from serial_mux.daemon import SerialDaemon
 
 @pytest.fixture
 def fake_usb_sysfs(tmp_path, monkeypatch):
+    """Build a synthetic Linux sysfs tree.
+
+    Real sysfs topology names contain ``:`` (for example ``1-2:1.0``) and the
+    class directory entries are symlinks. Windows cannot create either, so the
+    fixture is only valid inside explicitly marked Linux tests.
+    """
     sys_devices = tmp_path / "sys" / "devices"
     sys_class_tty = tmp_path / "sys" / "class" / "tty"
     dev_dir = tmp_path / "dev"
@@ -46,6 +52,7 @@ def fake_usb_sysfs(tmp_path, monkeypatch):
     }
 
 
+@pytest.mark.linux_only
 def test_usb_port_survives_reboot_and_resolves_new_tty(
     tmp_path, fake_usb_sysfs
 ):
@@ -83,6 +90,7 @@ def test_usb_port_survives_reboot_and_resolves_new_tty(
     assert json.loads(info_path.read_text())["device"] is None
 
 
+@pytest.mark.linux_only
 def test_usb_replug_in_same_boot_invalidates_mapping(fake_usb_sysfs):
     device = str(fake_usb_sysfs["dev_dir"] / "ttyUSB0")
     usb = state.inspect_usb_device(device)
@@ -100,6 +108,7 @@ def test_usb_replug_in_same_boot_invalidates_mapping(fake_usb_sysfs):
     assert status == "replugged"
 
 
+@pytest.mark.linux_only
 def test_usb_port_identity_normalizes_root_bus_number(fake_usb_sysfs):
     old = state.inspect_usb_tty("ttyUSB0")
     controller = fake_usb_sysfs["usb_device"].parents[1]
@@ -118,6 +127,7 @@ def test_usb_port_identity_normalizes_root_bus_number(fake_usb_sysfs):
     assert new["usb_instance"] != old["usb_instance"]
 
 
+@pytest.mark.linux_only
 def test_disconnected_usb_removes_inactive_serial_only_mapping(
     tmp_path, fake_usb_sysfs
 ):
@@ -140,6 +150,7 @@ def test_disconnected_usb_removes_inactive_serial_only_mapping(
     assert not info_path.exists()
 
 
+@pytest.mark.linux_only
 def test_disconnected_usb_keeps_ssh_mapping(tmp_path, fake_usb_sysfs):
     device = str(fake_usb_sysfs["dev_dir"] / "ttyUSB0")
     info = {
@@ -257,6 +268,7 @@ def test_serial_disconnect_clears_live_mapping(tmp_config, monkeypatch):
     assert broadcasts == [{"type": "serial_lost", "reason": "unplugged"}]
 
 
+@pytest.mark.linux_only
 def test_daemon_info_contains_boot_and_usb_identity(
     tmp_config, fake_usb_sysfs, monkeypatch
 ):

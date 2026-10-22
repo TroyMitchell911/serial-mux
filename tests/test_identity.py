@@ -1,12 +1,16 @@
 """Tests for node identity, pairing codes, and peer trust."""
 
+import os
+
 import pytest
 
 from serial_mux.identity import (
+    PRIVATE_FILE_MODE,
     IdentityError,
     NodeIdentityStore,
     PairingCodeStore,
     PairingStore,
+    restrict_permissions,
 )
 
 
@@ -21,7 +25,17 @@ def test_node_identity_is_stable_and_private(tmp_path):
     assert first.node_id.startswith("node-")
     assert len(first.secret) >= 32
     assert first.fingerprint == second.fingerprint
-    assert (path.stat().st_mode & 0o777) == 0o600
+
+    if os.name == "posix":
+        # POSIX: restrict_permissions must have set exactly 0o600.
+        assert (path.stat().st_mode & 0o777) == PRIVATE_FILE_MODE
+    else:
+        # Non-POSIX: file-level mode bits are not reliable; assert the file is
+        # readable and the store loads back to the same identity (parent-dir ACL
+        # is the effective security boundary on Windows).
+        assert path.exists()
+        reloaded = NodeIdentityStore(path).load_or_create()
+        assert reloaded == first
 
 
 def test_node_identity_rejects_tampering(tmp_path):
