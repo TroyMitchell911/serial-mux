@@ -11,9 +11,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+PRIVATE_FILE_MODE = 0o600
+
 
 class IdentityError(RuntimeError):
     """Raised when identity or pairing state is invalid."""
+
+
+def restrict_permissions(path: Path, mode: int = PRIVATE_FILE_MODE) -> bool:
+    """Apply private POSIX permissions to a secret-bearing file.
+
+    Windows has no POSIX mode bits; ``os.chmod`` there only toggles the
+    read-only attribute, so the caller must rely on the parent directory ACL
+    instead. The return value says whether real mode bits were applied, which
+    lets tests assert the policy per platform without weakening it on POSIX.
+    """
+    if os.name != "posix":
+        return False
+    os.chmod(path, mode)
+    return True
 
 
 def _write_private_json(path: Path, data: dict) -> None:
@@ -21,7 +37,7 @@ def _write_private_json(path: Path, data: dict) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(data, indent=2) + "\n")
     try:
-        os.chmod(temporary, 0o600)
+        restrict_permissions(temporary)
     except OSError:
         pass
     os.replace(temporary, path)

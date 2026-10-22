@@ -2,13 +2,21 @@
 
 import json
 import os
-import pty
 import select
-import termios
-import tty
+
+import pytest
+
+try:
+    import pty
+    import termios
+    import tty
+except ImportError:  # 非 POSIX 平台没有这些模块
+    pytest.skip("POSIX pty/termios required", allow_module_level=True)
 
 from serial_mux import client
 from serial_mux.protocol import b64
+
+pytestmark = pytest.mark.linux_only
 
 
 class FakeSocket:

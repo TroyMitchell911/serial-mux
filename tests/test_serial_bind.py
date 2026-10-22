@@ -11,6 +11,8 @@ import pytest
 from serial_mux.protocol import sync_write_msg, sync_read_msg, b64, unb64
 from tests.conftest import connect_to_daemon, PYTHON
 
+pytestmark = pytest.mark.linux_only
+
 
 @pytest.mark.timeout(30)
 class TestSerialBind:

@@ -5,3 +5,8 @@ dist/
 build/
 *.egg
 AGENTS.md
+serial_mux.egg-info/
+.pytest_cache/
+run/
+sock/
+logs/
