@@ -6,6 +6,8 @@ import pytest
 from serial_mux import client
 from serial_mux.protocol import b64
 
+pytestmark = pytest.mark.linux_only
+
 
 class Terminal:
     def __init__(self, rows):

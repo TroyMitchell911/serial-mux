@@ -4,8 +4,12 @@ import struct
 import pytest
 
 from serial_mux.protocol import (
+    CAPABILITIES,
+    PROTOCOL_VERSION,
+    ProtocolError,
     encode_msg, decode_msg, b64, unb64,
-    sync_read_msg, sync_write_msg,
+    make_envelope, negotiate_capabilities, negotiate_version,
+    sync_read_msg, sync_write_msg, validate_envelope,
     HEADER_FMT, HEADER_SIZE, MAX_MSG_SIZE,
 )
 
@@ -45,6 +49,42 @@ class TestEncodeDecodMsg:
         encoded = encode_msg(msg)
         decoded = decode_msg(encoded[HEADER_SIZE:])
         assert decoded == msg
+
+
+class TestEnvelope:
+    def test_make_and_validate(self):
+        message = make_envelope(
+            "output",
+            {"data": b64(b"hello")},
+            request_id="request-1",
+            connection_id="connection-1",
+        )
+        assert message["protocol"] == PROTOCOL_VERSION
+        assert validate_envelope(message) == message
+
+    def test_broadcast_cannot_have_request_id(self):
+        with pytest.raises(ProtocolError, match="broadcast"):
+            validate_envelope(make_envelope("output", broadcast=True, request_id="bad"))
+
+    def test_decode_rejects_invalid_envelope(self):
+        with pytest.raises(ProtocolError, match="payload"):
+            decode_msg(b'{"protocol":{"major":1,"minor":0},"type":"hello","payload":[]}' )
+
+    def test_negotiate_major_and_minor(self):
+        assert negotiate_version({"major": 1, "minor": 99}) == (True, "ok")
+        assert negotiate_version({"major": 2, "minor": 0}) == (
+            False,
+            "protocol_version_incompatible",
+        )
+        assert negotiate_version({"major": "1", "minor": 0}) == (
+            False,
+            "protocol_version_invalid",
+        )
+
+    def test_negotiate_capabilities_filters_unknown_values(self):
+        result = negotiate_capabilities(["request_id", "unknown", 1, "heartbeat"])
+        assert result == frozenset({"request_id", "heartbeat"})
+        assert result <= CAPABILITIES
 
 
 class TestSyncSocketIO:

@@ -8,8 +8,12 @@ import socket
 import subprocess
 import sys
 import time
-import termios
-import tty
+try:
+    import termios
+    import tty
+except ImportError:  # Windows interactive mode uses a platform adapter.
+    termios = None
+    tty = None
 from collections import deque
 from pathlib import Path
 
