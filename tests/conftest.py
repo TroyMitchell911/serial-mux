@@ -18,6 +18,21 @@ import sys as _sys
 PYTHON = _sys.executable
 
 
+def pytest_collection_modifyitems(config, items):
+    """Skip explicit ``linux_only`` tests outside Linux.
+
+    The marker lives on the test or module that actually needs POSIX serial,
+    terminal, signal or Unix-socket support, so Windows still runs everything
+    that is platform-neutral.
+    """
+    if _sys.platform.startswith("linux"):
+        return
+    skip = pytest.mark.skip(reason="requires Linux serial/terminal integration")
+    for item in items:
+        if item.get_closest_marker("linux_only") is not None:
+            item.add_marker(skip)
+
+
 @pytest.fixture
 def tmp_config(tmp_path):
     """Create a Config pointing to temp directories."""

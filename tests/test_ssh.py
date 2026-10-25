@@ -31,6 +31,8 @@ import pytest
 from serial_mux.protocol import sync_write_msg, sync_read_msg, b64, unb64
 from tests.conftest import connect_to_daemon, PYTHON
 
+pytestmark = pytest.mark.linux_only
+
 # Current username for user@127.0.0.1 targets
 _USER = getpass.getuser()
 

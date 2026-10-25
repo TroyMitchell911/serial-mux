@@ -8,10 +8,19 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.12"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.10"
+          - os: windows-latest
+            python-version: "3.12"
 
     steps:
       - uses: actions/checkout@v4
@@ -21,28 +30,31 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install system dependencies
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y socat openssh-server
 
       - name: Set up localhost SSH (key-based)
+        if: runner.os == 'Linux'
         run: |
           ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
           cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
           chmod 600 ~/.ssh/authorized_keys
-          # Start sshd
           sudo mkdir -p /run/sshd
           sudo /usr/sbin/sshd
-          # Accept host key
           ssh-keyscan -H localhost >> ~/.ssh/known_hosts 2>/dev/null
-          # Verify with user@127.0.0.1 (tests use user@IP, not bare hostname)
           ssh -o BatchMode=yes -o StrictHostKeyChecking=no 127.0.0.1 echo "SSH OK"
 
       - name: Install package and test dependencies
-        run: |
-          pip install -e ".[test]"
+        run: python -m pip install -e ".[test]"
 
-      - name: Run tests
-        run: |
-          python3 -m pytest tests/ -v --timeout=60
+      - name: Run Linux tests
+        if: runner.os == 'Linux'
+        run: python -m pytest tests/ -v --timeout=60
+
+      - name: Run Windows-compatible tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: python -m pytest tests/ -v --timeout=60
