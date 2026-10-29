@@ -5,7 +5,8 @@ Message format: 4-byte big-endian length prefix + JSON payload.
 Message types:
 
 Client -> Daemon:
-  {"type": "hello", "interactive": true|false}
+  {"type": "hello", "interactive": true|false, "token": "<gate token>"}
+      ("token" is optional and only matters while the input gate is on)
   {"type": "input", "data": "<base64 encoded bytes>"}
   {"type": "history_request"}
   {"type": "set_baud", "baud": <int>}
@@ -13,10 +14,15 @@ Client -> Daemon:
   {"type": "ssh_unbind"}
   {"type": "serial_bind", "device": "<path>", "baud": <int>}
   {"type": "serial_unbind"}
+  {"type": "gate_set", "token": "...", "note": "..."|null}
+  {"type": "gate_clear"}
+  {"type": "gate_status"}
 
 Daemon -> Client:
   {"type": "hello_ack", "alias": "...", "device": "...", "baud": ...,
-   "transport": "ssh"|"serial", "terminal_owner": true|false}
+   "transport": "ssh"|"serial", "terminal_owner": true|false,
+   "capabilities": ["input-gate"], "input_gate": true|false,
+   "input_allowed": true|false, "gate_note": "..."|null}
   {"type": "output", "data": "<base64 encoded bytes>"}
   {"type": "history", "lines": ["...", ...]}
   {"type": "error", "message": "..."}
@@ -25,6 +31,9 @@ Daemon -> Client:
   {"type": "serial_bind_ack", "device": "...", "ok": true/false, "message": "..."}
   {"type": "transport_changed", "transport": "ssh"|"serial"}
   {"type": "terminal_owner", "active": true|false}
+  {"type": "gate_ack", "enabled": true|false, "note": "..."|null}
+  {"type": "input_rejected", "message": "...", "note": "..."|null}
+      (sent once per client each time the gate changes)
 """
 
 import base64
@@ -32,6 +41,9 @@ import json
 import struct
 from typing import Optional
 
+
+# Features this daemon offers beyond the original protocol, sent in hello_ack.
+CAPABILITIES = ["input-gate"]
 
 HEADER_FMT = "!I"
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
