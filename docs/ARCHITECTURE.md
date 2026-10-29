@@ -38,6 +38,9 @@ serial-mux ssh-bind <alias> <target>
 serial-mux ssh-unbind <alias>
 serial-mux serial-bind <alias> <device> [--baud <rate>]
 serial-mux serial-unbind <alias>
+serial-mux gate on <alias> [--token-stdin] [--note <说明>]
+serial-mux gate off <alias>
+serial-mux gate status <alias>
 ```
 
 - `start` — 启动 daemon 进程。新建 alias 时 `DEVICE` 和 `--ssh` 至少指定一个；保存的 alias 可只用名称恢复
@@ -49,6 +52,7 @@ serial-mux serial-unbind <alias>
 - `ssh-unbind` — 解除 SSH 绑定，回退到串口
 - `serial-bind` — 为运行中的 daemon 绑定串口设备
 - `serial-unbind` — 解除串口绑定
+- `gate on/off/status` — 开关和查看输入闸门（见下文「输入闸门」）
 
 `list` 输出格式：
 
@@ -64,6 +68,7 @@ die1         /dev/ttyUSB1  115200  -  -  -  saved  -
 ```
 smtty <alias>                                          # 交互式模式
 smtty <alias> --send "ls" --wait "root@" --timeout 5         # 非交互式
+smtty <alias> --token <token>                          # 闸门开启时带 token 输入，也可用 SERIAL_MUX_TOKEN
 ```
 
 - alias 优先查找，未匹配时当设备路径处理
@@ -151,6 +156,17 @@ attach banner 显示当前传输层：
 - stdin 设为 raw mode，逐字符读取
 - 用户按键通过 Unix socket 发送给 daemon，daemon 转发到串口或 SSH
 
+### 输入闸门
+
+默认关闭；关闭时协议、输出和行为与没有闸门时一致。
+
+- `serial-mux gate on` 通过 socket 发 `gate_set`，把 token 和说明存进 daemon 内存；再次 `gate on` 直接换 token，`gate off` 发 `gate_clear`
+- 客户端在 `hello` 里带上 `token`；闸门开启时，只有 token 与当前 token 一致（`hmac.compare_digest`）的客户端能发 `input`
+- 其他客户端的 `input` 被丢弃，daemon 在每次闸门变化后只回一次 `input_rejected`（含说明），避免逐键刷屏；读、历史回放不受影响
+- `hello_ack` 带 `capabilities: ["input-gate"]` 以及 `input_gate`、`input_allowed`、`gate_note`，调用方据此识别旧版 daemon
+- 闸门开启时 alias JSON 写入 `input_gate: true` 和 `gate_note`，`list` 显示 `gated`；token 不落盘，daemon 重启后闸门关闭
+- 只管输入，不管 `set-baud`/`ssh-bind`/`serial-bind`；它防误操作，不是安全边界
+
 ## 非交互模式
 
 ```
@@ -164,7 +180,7 @@ smtty die0 --send "ls" --wait "root@" --timeout 5
 1. 连接 daemon 的 Unix socket
 2. 将命令向串口或 SSH 发送一次
 3. 立即收集输出；若指定 `--wait`，等待 pattern 出现或超时
-4. 成功 → 静默退出，stdout 输出命令结果
+4. 成功 → 静默退出，stdout 输出命令结果；闸门拒绝输入时报错退出（exit code 3）
 
 客户端不校验终端回显，也不会自动重发命令。
 

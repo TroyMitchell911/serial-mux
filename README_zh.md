@@ -146,6 +146,8 @@ serial-mux stop die0
 | `serial-mux ssh-unbind <alias>` | 解除 SSH 绑定，回退到串口 |
 | `serial-mux serial-bind <alias> <device> [--baud]` | 为运行中的 daemon 绑定串口 |
 | `serial-mux serial-unbind <alias>` | 解除串口绑定 |
+| `serial-mux gate on <alias> [--token-stdin] [--note 说明]` | 开启输入闸门：只有带 token 的客户端能输入（默认关闭，见下文） |
+| `serial-mux gate off <alias>` / `gate status <alias>` | 关闭闸门 / 查看闸门状态 |
 
 `serial-mux list` 输出示例：
 
@@ -164,6 +166,26 @@ die1         /dev/ttyUSB1  115200  -  -  -  saved  -
 | `smtty <alias> --timestamps` | 交互模式，显示时间戳 |
 | `smtty <alias> --tail [N]` | 打印最后 N 行日志并退出（默认 50） |
 | `smtty <alias> --send 'cmd' --wait 'pattern' --timeout 5` | 非交互模式 |
+| `smtty <alias> --token <token>` | 闸门开启时带上 token 才能输入（也可用环境变量 `SERIAL_MUX_TOKEN`） |
+
+### 输入闸门（可选）
+
+daemon 可以要求输入时带 token，防止别人正在用的板子被误输入。读不受限制：所有客户端照常看到输出和历史。闸门默认关闭，不开启时行为与原来完全一致。
+
+```bash
+# 开启并生成新 token（stdout 只输出 token）
+TOKEN=$(serial-mux gate on die0 --note "alice 正在调内核")
+
+# 或者从 stdin 传入自己的 token，例如锁服务分配的
+printf '%s\n' "$TOKEN" | serial-mux gate on die0 --token-stdin --note "alice 在用"
+
+serial-mux gate status die0   # on (alice 在用)
+serial-mux gate off die0
+```
+
+用另一个 token 再次 `gate on` 会立即替换旧 token。客户端用 `smtty --token` 或 `SERIAL_MUX_TOKEN` 出示 token；其他客户端的输入会被丢弃，并在每次闸门变化后提示一次「已锁定」和说明。非交互模式被拒绝时退出码为 3。`serial-mux list` 把开着闸门的 daemon 显示为 `gated`，`serial-mux status` 多出一行 `Gate:`。
+
+闸门只存在 daemon 内存里：daemon 重启后闸门关闭，需要由设置它的一方重新设置。闸门只管输入，`set-baud`、`ssh-bind`、`serial-bind` 不受限制。它防的是误操作，不是安全边界：同一用户的其他进程总能停掉 daemon 直接打开设备。支持闸门的 daemon 会在握手里声明 `input-gate`，`serial-mux gate` 遇到不支持的旧 daemon 会直接报错。
 
 ## 非交互模式
 
