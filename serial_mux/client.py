@@ -122,8 +122,13 @@ def connect(
     config: Config,
     alias: str,
     interactive: bool = False,
+    token: str | None = None,
 ) -> tuple[socket.socket, str]:
-    """Connect to daemon and perform handshake. Auto-resumes dead daemons."""
+    """Connect to daemon and perform handshake. Auto-resumes dead daemons.
+
+    ``token`` is presented to the daemon's input gate; without a gate it has
+    no effect.
+    """
     sock_path = resolve_socket(config, alias)
 
     need_resume = False
@@ -165,10 +170,10 @@ def connect(
         sock.connect(sock_path)
 
     # Send hello
-    sync_write_msg(
-        sock,
-        {"type": "hello", "interactive": interactive},
-    )
+    hello = {"type": "hello", "interactive": interactive}
+    if token:
+        hello["token"] = token
+    sync_write_msg(sock, hello)
 
     # Read hello_ack
     msg = sync_read_msg(sock)
@@ -394,9 +399,16 @@ def _restore_local_terminal(
         termios.tcsetattr(input_fd, termios.TCSADRAIN, settings)
 
 
-def interactive_mode(config: Config, alias: str, timestamps: bool = False):
+def _rejection_text(msg: dict) -> str:
+    """The daemon's refusal plus the note left by whoever turned the gate on."""
+    note = msg.get("note")
+    return msg.get("message", "input refused") + (f" ({note})" if note else "")
+
+
+def interactive_mode(config: Config, alias: str, timestamps: bool = False,
+                     token: str | None = None):
     """Interactive attach mode — like tio/minicom but multiplexed."""
-    sock, transport = connect(config, alias, interactive=True)
+    sock, transport = connect(config, alias, interactive=True, token=token)
 
     # Read history (will be replayed after entering raw mode)
     history_msg = sync_read_msg(sock)
@@ -497,6 +509,13 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
                     if message_type == "terminal_owner":
                         terminal_owner = bool(msg.get("active"))
                         query_filter.reset()
+                    elif message_type == "input_rejected":
+                        os.write(
+                            output_fd,
+                            f"\r\n--- serial-mux: {_rejection_text(msg)}; "
+                            f"output still shows ---\r\n".encode("utf-8"),
+                        )
+                        last_output_was_newline = True
                     elif message_type == "output":
                         data = unb64(msg["data"])
                         if not terminal_owner:
@@ -539,11 +558,17 @@ def interactive_mode(config: Config, alias: str, timestamps: bool = False):
         print(f"--- {exit_message} ---\r\n", end="", flush=True)
 
 
+def _exit_rejected(sock: socket.socket, msg: dict):
+    print(f"Error: {_rejection_text(msg)}", file=sys.stderr)
+    sock.close()
+    sys.exit(3)
+
+
 def noninteractive_mode(config: Config, alias: str,
                          send_cmd: str, wait_pattern: str = None,
-                         timeout: float = 10.0):
+                         timeout: float = 10.0, token: str | None = None):
     """Non-interactive mode: send a command once, then wait for output."""
-    sock, _transport = connect(config, alias)
+    sock, _transport = connect(config, alias, token=token)
 
     # Drain history
     msg = sync_read_msg(sock)  # history message
@@ -577,6 +602,8 @@ def noninteractive_mode(config: Config, alias: str,
             if sock in readable:
                 try:
                     msg = sync_read_msg(sock)
+                    if msg and msg["type"] == "input_rejected":
+                        _exit_rejected(sock, msg)
                     if msg and msg["type"] == "output":
                         all_output += unb64(msg["data"]).decode("utf-8", errors="replace")
                         if wait_re.search(all_output):
@@ -601,6 +628,8 @@ def noninteractive_mode(config: Config, alias: str,
             if sock in readable:
                 try:
                     msg = sync_read_msg(sock)
+                    if msg and msg["type"] == "input_rejected":
+                        _exit_rejected(sock, msg)
                     if msg and msg["type"] == "output":
                         all_output += unb64(msg["data"]).decode("utf-8", errors="replace")
                 except BlockingIOError:
@@ -670,6 +699,9 @@ def main():
     parser.add_argument("--tail", type=int, nargs="?", const=50, default=None,
                         metavar="N",
                         help="Print last N lines from log and exit (default: 50)")
+    parser.add_argument("--token", default=os.environ.get("SERIAL_MUX_TOKEN"),
+                        help="Token for a daemon whose input gate is on "
+                             "(default: $SERIAL_MUX_TOKEN)")
 
     args = parser.parse_args()
     config = Config.load()
@@ -680,12 +712,14 @@ def main():
         noninteractive_mode(config, args.alias,
                            send_cmd=args.send,
                            wait_pattern=args.wait,
-                           timeout=args.timeout)
+                           timeout=args.timeout,
+                           token=args.token)
     else:
         if not sys.stdin.isatty():
             print("Error: Interactive mode requires a terminal", file=sys.stderr)
             sys.exit(1)
-        interactive_mode(config, args.alias, timestamps=args.timestamps)
+        interactive_mode(config, args.alias, timestamps=args.timestamps,
+                         token=args.token)
 
 
 if __name__ == "__main__":

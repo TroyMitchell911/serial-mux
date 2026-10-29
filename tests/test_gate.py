@@ -242,3 +242,28 @@ class TestGateCommands:
         assert "does not support input-gate" in capsys.readouterr().out
         thread.join(timeout=3)
         server.close()
+
+
+@pytest.mark.timeout(30)
+class TestSmttyToken:
+    def test_send_without_token_is_refused(self, daemon_foreground, capsys):
+        proc, alias, config, pty_peer = daemon_foreground
+        control, _ = hello(config, alias)
+        request(control, {"type": "gate_set", "token": "secret", "note": "held by carol"})
+
+        with pytest.raises(SystemExit) as exit_info:
+            client.noninteractive_mode(config, alias, send_cmd="reboot")
+        assert exit_info.value.code == 3
+        err = capsys.readouterr().err
+        assert "locked" in err and "held by carol" in err
+        assert peer_received(pty_peer) == b""
+        control.close()
+
+    def test_send_with_token_goes_through(self, daemon_foreground):
+        proc, alias, config, pty_peer = daemon_foreground
+        control, _ = hello(config, alias)
+        request(control, {"type": "gate_set", "token": "secret"})
+
+        client.noninteractive_mode(config, alias, send_cmd="uname", token="secret")
+        assert b"uname\r" in peer_received(pty_peer, wait=0)
+        control.close()
