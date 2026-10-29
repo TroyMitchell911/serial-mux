@@ -167,3 +167,78 @@ class TestInputGate:
         assert reply["type"] == "error"
         assert request(sock, {"type": "gate_status"})["enabled"] is False
         sock.close()
+
+
+@pytest.mark.timeout(30)
+class TestGateCommands:
+    def test_on_status_off(self, daemon_foreground, monkeypatch, capsys):
+        proc, alias, config, pty_peer = daemon_foreground
+        monkeypatch.setattr(cli.Config, "load", lambda: config)
+
+        cli.cmd_gate_on(SimpleNamespace(alias=alias, token_stdin=False, note="held by bob"))
+        out = capsys.readouterr()
+        token = out.out.strip()
+        assert len(token) >= 24
+        assert "Input gate on" in out.err
+
+        cli.cmd_gate_status(SimpleNamespace(alias=alias))
+        assert capsys.readouterr().out.strip() == "on (held by bob)"
+        cli.cmd_list(SimpleNamespace())
+        assert "gated" in capsys.readouterr().out
+        cli.cmd_status(SimpleNamespace(alias=alias))
+        assert "Gate:    on (held by bob)" in capsys.readouterr().out
+
+        sock, ack = hello(config, alias, token=token)
+        assert ack["input_allowed"] is True
+        sock.close()
+
+        cli.cmd_gate_off(SimpleNamespace(alias=alias))
+        capsys.readouterr()
+        cli.cmd_gate_status(SimpleNamespace(alias=alias))
+        assert capsys.readouterr().out.strip() == "off"
+        cli.cmd_status(SimpleNamespace(alias=alias))
+        assert "Gate:" not in capsys.readouterr().out
+
+    def test_on_reads_the_token_from_stdin(self, daemon_foreground, monkeypatch, capsys):
+        proc, alias, config, pty_peer = daemon_foreground
+        monkeypatch.setattr(cli.Config, "load", lambda: config)
+        monkeypatch.setattr(cli.sys, "stdin", SimpleNamespace(readline=lambda: "from-stdin\n"))
+
+        cli.cmd_gate_on(SimpleNamespace(alias=alias, token_stdin=True, note=None))
+        assert capsys.readouterr().out == ""
+        sock, ack = hello(config, alias, token="from-stdin")
+        assert ack["input_allowed"] is True
+        sock.close()
+
+    def test_refuses_a_daemon_without_the_gate(self, tmp_config, monkeypatch, capsys):
+        """An older daemon would ignore gate_set, so the command must not wait on it."""
+        alias = "old0"
+        path = tmp_config.sock_dir / f"{alias}.sock"
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(path))
+        server.listen(1)
+
+        def old_daemon():
+            conn, _ = server.accept()
+            sync_read_msg(conn)
+            sync_write_msg(conn, {"type": "hello_ack", "alias": alias, "device": None, "baud": 115200, "transport": "serial"})
+            sync_write_msg(conn, {"type": "history", "lines": []})
+            try:
+                conn.recv(1)
+            except OSError:
+                pass
+            conn.close()
+
+        thread = threading.Thread(target=old_daemon, daemon=True)
+        thread.start()
+        (tmp_config.run_dir / f"{alias}.json").write_text(json.dumps({
+            "alias": alias, "device": None, "baud": 115200, "pid": os.getpid(), "socket": str(path),
+        }))
+        monkeypatch.setattr(cli.Config, "load", lambda: tmp_config)
+
+        with pytest.raises(SystemExit) as exit_info:
+            cli.cmd_gate_on(SimpleNamespace(alias=alias, token_stdin=False, note=None))
+        assert exit_info.value.code == 1
+        assert "does not support input-gate" in capsys.readouterr().out
+        thread.join(timeout=3)
+        server.close()
