@@ -1,6 +1,7 @@
 """serial-mux daemon: holds the serial port, fans out to clients via Unix socket."""
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -20,6 +21,7 @@ from .protocol import (
     async_write_msg,
     b64,
     unb64,
+    CAPABILITIES,
     HEADER_FMT,
     HEADER_SIZE,
     MAX_MSG_SIZE,
@@ -64,6 +66,12 @@ class SerialDaemon:
         self.clients: list[asyncio.StreamWriter] = []
         self._interactive_clients: list[asyncio.StreamWriter] = []
         self._terminal_owner: Optional[asyncio.StreamWriter] = None
+        # Input gate: off unless a token is set. It lives in memory only, so a
+        # restarted daemon starts ungated and whoever set it must set it again.
+        self._gate_token: Optional[str] = None
+        self._gate_note: Optional[str] = None
+        self._client_tokens: dict[asyncio.StreamWriter, str] = {}
+        self._gate_notified: set[asyncio.StreamWriter] = set()
         self.log_lines: list[str] = []  # ring buffer for scrollback
         self.log_file = None
         self.log_date: Optional[str] = None
@@ -102,6 +110,9 @@ class SerialDaemon:
             "ssh": self.ssh_target,
             "boot_id": self.boot_id,
         }
+        if self._gate_token is not None:
+            info["input_gate"] = True
+            info["gate_note"] = self._gate_note
         info.update(self._usb_info)
         write_info(self._info_path(), info)
 
@@ -291,8 +302,31 @@ class SerialDaemon:
         except Exception:
             pass
 
+    def _input_allowed(self, writer: asyncio.StreamWriter) -> bool:
+        """Whether this client may write while the gate is in its current state."""
+        if self._gate_token is None:
+            return True
+        token = self._client_tokens.get(writer)
+        return token is not None and hmac.compare_digest(
+            token.encode("utf-8"), self._gate_token.encode("utf-8")
+        )
+
+    def _gate_state(self) -> dict:
+        return {"enabled": self._gate_token is not None, "note": self._gate_note}
+
+    def _set_gate(self, token: Optional[str], note: Optional[str]):
+        """Turn the gate on with ``token`` (replacing any earlier one), or off with None."""
+        self._gate_token = token
+        self._gate_note = note if token is not None else None
+        # Every client hears about a refusal once more under the new state.
+        self._gate_notified.clear()
+        self._write_info()
+        logger.info(f"Input gate {'on' if token is not None else 'off'}")
+
     async def _remove_client(self, writer: asyncio.StreamWriter):
         """Remove a disconnected client."""
+        self._client_tokens.pop(writer, None)
+        self._gate_notified.discard(writer)
         if writer in self.clients:
             self.clients.remove(writer)
         if writer in self._interactive_clients:
@@ -329,6 +363,9 @@ class SerialDaemon:
                 return
 
             self.clients.append(writer)
+            token = msg.get("token")
+            if isinstance(token, str) and token:
+                self._client_tokens[writer] = token
             interactive = bool(msg.get("interactive", False))
             if interactive:
                 self._interactive_clients.append(writer)
@@ -344,6 +381,10 @@ class SerialDaemon:
                 "baud": self.baud,
                 "transport": "ssh" if self._ssh_is_connected() else "serial",
                 "terminal_owner": writer is self._terminal_owner,
+                "capabilities": CAPABILITIES,
+                "input_gate": self._gate_token is not None,
+                "input_allowed": self._input_allowed(writer),
+                "gate_note": self._gate_note,
             })
 
             # Send history
@@ -387,6 +428,16 @@ class SerialDaemon:
         msg_type = msg.get("type")
 
         if msg_type == "input":
+            if not self._input_allowed(writer):
+                # Drop the input; tell the client once rather than per keystroke.
+                if writer not in self._gate_notified:
+                    self._gate_notified.add(writer)
+                    await async_write_msg(writer, {
+                        "type": "input_rejected",
+                        "message": f"'{self.alias}' is locked: input needs the gate token",
+                        "note": self._gate_note,
+                    })
+                return
             data = unb64(msg["data"])
             # Write to SSH if connected, else serial
             if self._ssh_is_connected():
@@ -483,6 +534,25 @@ class SerialDaemon:
                 "ok": True,
                 "message": "Serial unbound",
             })
+
+        elif msg_type == "gate_set":
+            token = msg.get("token")
+            note = msg.get("note")
+            if not isinstance(token, str) or not token.strip() or len(token) > 256:
+                await async_write_msg(writer, {
+                    "type": "error",
+                    "message": "Gate token must be 1-256 characters",
+                })
+                return
+            self._set_gate(token, note if isinstance(note, str) and note else None)
+            await async_write_msg(writer, {"type": "gate_ack", **self._gate_state()})
+
+        elif msg_type == "gate_clear":
+            self._set_gate(None, None)
+            await async_write_msg(writer, {"type": "gate_ack", **self._gate_state()})
+
+        elif msg_type == "gate_status":
+            await async_write_msg(writer, {"type": "gate_ack", **self._gate_state()})
 
     async def run(self):
         """Main daemon entry point."""

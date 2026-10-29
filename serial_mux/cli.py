@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import secrets
 import signal
 import socket
 import sys
@@ -231,6 +232,8 @@ def cmd_list(args):
         baud = info.get("baud", "?")
         pid = info.get("pid", "?") if info["_running"] else "-"
         status = "running" if info["_running"] else "saved"
+        if info["_running"] and info.get("input_gate"):
+            status = "gated"
         clients = info.get("clients_count", "?") if info["_running"] else "-"
         start_time = info.get("start_time")
         uptime = format_uptime(start_time) if start_time and info["_running"] else "-"
@@ -265,6 +268,9 @@ def cmd_status(args):
         print(f"USB Port: {usb_port}")
     ssh = info.get("ssh")
     print(f"SSH:     {ssh if ssh else 'none'}")
+    if running and info.get("input_gate"):
+        note = info.get("gate_note")
+        print(f"Gate:    on" + (f" ({note})" if note else ""))
 
     # Log info
     log_dir = config.logs_dir / alias
@@ -330,11 +336,14 @@ def cmd_set_baud(args):
         sock.close()
 
 
-def _send_daemon_msg(alias: str, msg: dict, expect_type: str = None) -> dict:
+def _send_daemon_msg(alias: str, msg: dict, expect_type: str = None,
+                     capability: str = None) -> dict:
     """Connect to daemon, handshake, send a message, return response.
 
     If expect_type is set, skip intermediate broadcast messages until we get
-    a message of that type (or timeout).
+    a message of that type (or timeout). If capability is set, fail when the
+    daemon's handshake does not offer it (an older daemon would ignore the
+    message instead of answering).
     """
     config = Config.load()
     info = resolve_alias(config, alias)
@@ -357,6 +366,12 @@ def _send_daemon_msg(alias: str, msg: dict, expect_type: str = None) -> dict:
         resp = sync_read_msg(sock)
         if not resp or resp.get("type") != "hello_ack":
             print(f"Error: Unexpected response from daemon")
+            sys.exit(1)
+        if capability and capability not in resp.get("capabilities", []):
+            print(
+                f"Error: Daemon '{info.get('alias', alias)}' does not support "
+                f"{capability}; restart it with this serial-mux version"
+            )
             sys.exit(1)
         sync_read_msg(sock)  # drain history
         sync_write_msg(sock, msg)
@@ -431,6 +446,55 @@ def cmd_serial_unbind(args):
         sys.exit(1)
 
 
+def _print_gate(alias: str, resp: dict):
+    if not resp or resp.get("type") != "gate_ack":
+        message = resp.get("message") if resp and resp.get("type") == "error" else f"Unexpected response: {resp}"
+        print(f"Error: {message}")
+        sys.exit(1)
+    state = "on" if resp.get("enabled") else "off"
+    note = resp.get("note")
+    print(f"Input gate {state} for '{alias}'" + (f" ({note})" if note else ""), file=sys.stderr)
+
+
+def cmd_gate_on(args):
+    """Require a token for input; reads stay open to every client."""
+    if args.token_stdin:
+        token = sys.stdin.readline().strip()
+        if not token:
+            print("Error: No token on stdin")
+            sys.exit(1)
+    else:
+        token = secrets.token_urlsafe(24)
+    resp = _send_daemon_msg(
+        args.alias,
+        {"type": "gate_set", "token": token, "note": args.note},
+        expect_type="gate_ack",
+        capability="input-gate",
+    )
+    _print_gate(args.alias, resp)
+    if not args.token_stdin:
+        # Only the token goes to stdout, so `TOKEN=$(serial-mux gate on die0)` works.
+        print(token)
+
+
+def cmd_gate_off(args):
+    """Let every client write again."""
+    resp = _send_daemon_msg(args.alias, {"type": "gate_clear"},
+                            expect_type="gate_ack", capability="input-gate")
+    _print_gate(args.alias, resp)
+
+
+def cmd_gate_status(args):
+    """Show whether input needs a token."""
+    resp = _send_daemon_msg(args.alias, {"type": "gate_status"},
+                            expect_type="gate_ack", capability="input-gate")
+    if not resp or resp.get("type") != "gate_ack":
+        print(f"Error: Unexpected response: {resp}")
+        sys.exit(1)
+    note = resp.get("note")
+    print(("on" if resp.get("enabled") else "off") + (f" ({note})" if note else ""))
+
+
 def main():
     parser = argparse.ArgumentParser(prog="serial-mux", description="Serial port multiplexer")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -486,6 +550,26 @@ def main():
     p_serial_unbind = sub.add_parser("serial-unbind", help="Unbind serial port from a running daemon")
     p_serial_unbind.add_argument("alias", help="Alias")
     p_serial_unbind.set_defaults(func=cmd_serial_unbind)
+
+    # gate
+    p_gate = sub.add_parser("gate", help="Require a token for input to a running daemon")
+    gate_sub = p_gate.add_subparsers(dest="gate_command", required=True)
+    p_gate_on = gate_sub.add_parser(
+        "on",
+        help="Turn the gate on; prints a new token unless --token-stdin is given",
+    )
+    p_gate_on.add_argument("alias", help="Alias or device path")
+    p_gate_on.add_argument("--token-stdin", action="store_true",
+                           help="Read the token from the first line of stdin")
+    p_gate_on.add_argument("--note", default=None,
+                           help="Shown to clients whose input is refused (e.g. who holds the board)")
+    p_gate_on.set_defaults(func=cmd_gate_on)
+    p_gate_off = gate_sub.add_parser("off", help="Turn the gate off")
+    p_gate_off.add_argument("alias", help="Alias or device path")
+    p_gate_off.set_defaults(func=cmd_gate_off)
+    p_gate_status = gate_sub.add_parser("status", help="Show whether the gate is on")
+    p_gate_status.add_argument("alias", help="Alias or device path")
+    p_gate_status.set_defaults(func=cmd_gate_status)
 
     args = parser.parse_args()
     args.func(args)

@@ -19,6 +19,9 @@ class FakeSocket:
     def setblocking(self, blocking):
         self.blocking = blocking
 
+    def settimeout(self, timeout):
+        pass
+
     def close(self):
         self.closed = True
 
@@ -96,7 +99,7 @@ def test_interactive_mode_claims_terminal_and_restores_on_detach(
     restored = []
     connections = []
 
-    def fake_connect(config, alias, interactive=False):
+    def fake_connect(config, alias, interactive=False, token=None):
         connections.append((alias, interactive))
         return sock, "serial"
 
@@ -138,6 +141,44 @@ def test_interactive_mode_claims_terminal_and_restores_on_detach(
     assert "--- detached ---" in "".join(fake_stdout.output)
 
 
+def test_interactive_mode_says_once_that_input_is_locked(monkeypatch):
+    sock = FakeSocket()
+    fake_stdin = FakeTTY(10)
+    fake_stdout = FakeTTY(11)
+    terminal_writes = []
+    tokens = []
+    messages = iter([
+        {"type": "history", "lines": []},
+        {"type": "input_rejected", "message": "'com260' is locked: input needs the gate token", "note": "held by alice"},
+    ])
+    ready = iter([[sock], [fake_stdin]])
+
+    def fake_connect(config, alias, interactive=False, token=None):
+        tokens.append(token)
+        return sock, "serial"
+
+    monkeypatch.setattr(client, "connect", fake_connect)
+    monkeypatch.setattr(client, "sync_read_msg", lambda current_sock: next(messages))
+    monkeypatch.setattr(client.sys, "stdin", fake_stdin)
+    monkeypatch.setattr(client.sys, "stdout", fake_stdout)
+    monkeypatch.setattr(client.os, "isatty", lambda fd: True)
+    monkeypatch.setattr(client.os, "write", lambda fd, data: terminal_writes.append(bytes(data)) or len(data))
+    monkeypatch.setattr(client.os, "read", lambda fd, size: b"\x1d")
+    monkeypatch.setattr(client.select, "select", lambda *args: (next(ready), [], []))
+    monkeypatch.setattr(client.termios, "tcgetattr", lambda fd: "saved")
+    monkeypatch.setattr(client.termios, "tcsetattr", lambda fd, when, value: None)
+    monkeypatch.setattr(client.tty, "setraw", lambda fd: None)
+
+    client.interactive_mode(object(), "com260", token="wrong")
+
+    assert tokens == ["wrong"]
+    notices = [data for data in terminal_writes if b"locked" in data]
+    assert notices == [
+        b"\r\n--- serial-mux: 'com260' is locked: input needs the gate token "
+        b"(held by alice); output still shows ---\r\n"
+    ]
+
+
 def test_noninteractive_sends_once_without_echo(monkeypatch):
     """A response without a command echo must not cause another send."""
     sock = FakeSocket()
@@ -147,7 +188,7 @@ def test_noninteractive_sends_once_without_echo(monkeypatch):
     ])
     writes = []
 
-    monkeypatch.setattr(client, "connect", lambda config, alias: (sock, "serial"))
+    monkeypatch.setattr(client, "connect", lambda config, alias, token=None: (sock, "serial"))
     monkeypatch.setattr(client, "sync_read_msg", lambda current_sock: next(messages))
     monkeypatch.setattr(
         client,

@@ -164,6 +164,25 @@ serial-mux set-baud die0 9600
 
 Changes the baud rate of a running daemon on the fly. The daemon updates the serial port, persists the new baud rate to its info file, and notifies all connected clients. Requires an active serial connection — returns an error in SSH-only mode.
 
+#### Input gate (optional)
+
+A daemon can require a token for input, so a board someone is using is not typed into by mistake. Reading is never gated: every client still sees the output and history. The gate is off unless you turn it on, and while it is off nothing behaves differently.
+
+```bash
+# Turn it on; prints a new token (only the token goes to stdout)
+TOKEN=$(serial-mux gate on die0 --note "held by alice for a kernel bring-up")
+
+# Or supply your own token on stdin, e.g. from a lock service
+printf '%s\n' "$TOKEN" | serial-mux gate on die0 --token-stdin --note "held by alice"
+
+serial-mux gate status die0   # on (held by alice)
+serial-mux gate off die0
+```
+
+Turning the gate on again with another token replaces the old one at once. Clients present the token with `smtty --token` or `SERIAL_MUX_TOKEN`; input from any other client is dropped, and that client is told once (per gate change) that the port is locked, together with the note. `serial-mux list` shows a gated daemon as `gated`, and `serial-mux status` adds a `Gate:` line.
+
+The gate lives in the daemon's memory: a restarted daemon comes back ungated, and whatever set the gate must set it again. Only input is gated; `set-baud`, `ssh-bind` and `serial-bind` are not. This guards against mistakes, not against other processes of the same user, which can always stop the daemon and open the device directly. Daemons that support the gate list `input-gate` in their handshake; `serial-mux gate` refuses to talk to one that does not.
+
 #### Check daemon status
 
 ```bash
@@ -245,6 +264,7 @@ Flags:
 - `--send` / `-s` — command string to send
 - `--wait` / `-w` — regex/string pattern to wait for in output
 - `--timeout` / `-t` — seconds to wait for the pattern (default: 10)
+- `--token` — token for a daemon whose [input gate](#input-gate-optional) is on (default: `$SERIAL_MUX_TOKEN`); interactive mode accepts it too
 
 #### SSH transport
 
@@ -267,6 +287,7 @@ Non-interactive mode sends each command exactly once on both serial and SSH tran
 | 0    | Success (command sent, pattern matched if `--wait` was used) |
 | 1    | Connection error |
 | 2    | Timeout waiting for `--wait` pattern |
+| 3    | Input refused: the daemon's input gate is on and no valid token was given |
 
 ## Identity Tagging
 
